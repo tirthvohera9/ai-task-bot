@@ -1,13 +1,10 @@
 """
 OpenRouter AI service — the single brain for all AI decisions.
 
-Uses the OpenAI-compatible API endpoint provided by OpenRouter.
-Any model on openrouter.ai can be swapped in via OPENROUTER_MODEL.
-
 Functions:
-  parse_intent()       — route user text → structured intent JSON
-  synthesize_response() — turn raw task data into a natural answer
-  general_chat()       — conversational fallback
+  parse_intent()        → structured intent JSON from user text
+  synthesize_response() → natural answer from raw task data
+  general_chat()        → conversational fallback
 """
 import json
 import logging
@@ -36,116 +33,86 @@ _INTENT_SYSTEM = """\
 You are an intelligent personal assistant and task extraction engine.
 Given a user message, return ONLY a single valid JSON object — no explanation, no markdown.
 
-Current UTC time is provided in each message.
-
 === OUTPUT SCHEMA ===
 {
-  "action":      "add | list | delete | done | search",
-  "title":       "clean task title for add/delete/done, or null",
-  "keyword":     "single best search keyword (for search action), or null",
-  "keywords":    ["term1", "term2", "term3"],
-  "datetime":    "ISO8601 UTC string or null",
-  "date_range":  "today | tomorrow | this_week | last_7_days | last_15_days | last_30_days | all | null",
-  "priority":    "low | medium | high",
-  "category":    "work | personal | health | shopping | finance | travel | family | fitness | other | null",
-  "notes":       "context or purpose behind the task extracted from the message, or null",
+  "action":       "add | list | delete | done | search | update",
+  "title":        "task title for add/delete/done/update, or null",
+  "keyword":      "primary search keyword (for search), or null",
+  "keywords":     ["term1", "term2"],
+  "update_field": "datetime | priority | title | status | null",
+  "update_value": "new value for the updated field, or null",
+  "datetime":     "ISO8601 UTC string or null",
+  "date_range":   "today | tomorrow | this_week | last_7_days | last_15_days | last_30_days | all | null",
+  "priority":     "low | medium | high",
+  "category":     "work | personal | health | shopping | finance | travel | family | fitness | other | null",
+  "notes":        "purpose/context extracted from the message, or null",
+  "recurrence":   "none | daily | weekly:MON | weekly:TUE | weekly:WED | weekly:THU | weekly:FRI | weekly:SAT | weekly:SUN | monthly:1..31 | null",
   "include_done": false,
-  "confidence":  0.95
+  "confidence":   0.95
 }
 
 === ACTION RULES ===
-- action=add    : user is creating / scheduling / planning something new
-- action=list   : user wants ALL tasks in a time window (no specific subject)
-- action=search : user is asking about a specific subject, keyword, or category
-- action=done   : marking something as completed
-- action=delete : removing/cancelling a task
+- add    : creating / scheduling / planning something new
+- list   : wants ALL tasks in a time window (no specific subject)
+- search : asking about a specific subject/keyword/category
+- done   : marking something as completed
+- delete : removing/cancelling a task
+- update : changing an existing task's field (datetime, priority, title, or status)
 
-=== SYNONYM & CATEGORY UNDERSTANDING ===
-Shopping / buying:
-  keywords: ["buy", "get", "purchase", "pick up", "groceries", "milk", "store", "shop"]
-  triggers: "what do I need to buy?", "what should I get?", "anything to pick up?"
-  → action=search, category=shopping, keywords=["buy","get","groceries","shopping","purchase","pick up"]
+=== UPDATE EXAMPLES ===
+"move meeting to 6pm"         → action=update, title="meeting",  update_field="datetime", update_value="6pm"
+"change dentist to next week" → action=update, title="dentist",  update_field="datetime", update_value="next week"
+"mark gym as high priority"   → action=update, title="gym",      update_field="priority", update_value="high"
+"rename report to final draft"→ action=update, title="report",   update_field="title",    update_value="final draft"
+"reschedule rent to the 10th" → action=update, title="rent",     update_field="datetime", update_value="the 10th"
 
-Health / medical:
-  keywords: ["doctor", "dentist", "hospital", "clinic", "medicine", "prescription",
-             "checkup", "appointment", "therapy", "physiotherapy", "gym"]
-  triggers: "any doctor appointments?", "health stuff?", "medical?", "dentist?"
-  → action=search, category=health, keywords=["doctor","dentist","appointment","medical","medicine","hospital","checkup"]
+=== RECURRENCE RULES ===
+"every day" / "daily"              → recurrence="daily"
+"every Monday"                     → recurrence="weekly:MON"
+"every week on Friday"             → recurrence="weekly:FRI"
+"every month on the 5th"           → recurrence="monthly:5"
+No recurrence mentioned            → recurrence="none"
 
-Work / professional:
-  keywords: ["meeting", "call", "standup", "presentation", "deadline", "client",
-             "project", "report", "office", "interview", "email"]
-  triggers: "any work stuff?", "meetings?", "deadlines?", "professional tasks?"
-  → action=search, category=work, keywords=["meeting","call","deadline","presentation","project","report"]
+=== SYNONYM UNDERSTANDING ===
+Shopping/buying: "buy", "get", "purchase", "pick up", "groceries", "store"
+  → category=shopping, keywords=["buy","get","groceries","shopping","purchase","pick up"]
 
-Finance / bills:
-  keywords: ["pay", "bill", "rent", "invoice", "bank", "insurance", "tax", "subscription"]
-  triggers: "any bills?", "payments due?", "financial stuff?"
-  → action=search, category=finance, keywords=["pay","bill","rent","invoice","insurance","bank"]
+Health/medical: "doctor", "dentist", "hospital", "clinic", "medicine", "prescription",
+                "checkup", "appointment", "therapy"
+  → category=health, keywords=["doctor","dentist","appointment","medical","medicine","hospital"]
 
-Travel / trips:
-  keywords: ["flight", "hotel", "trip", "travel", "vacation", "airport", "booking", "visa"]
-  triggers: "any travel plans?", "trip stuff?", "flights?"
-  → action=search, category=travel, keywords=["flight","trip","hotel","travel","vacation"]
+Work: "meeting", "call", "standup", "presentation", "deadline", "client", "project",
+      "report", "office", "interview", "email"
+  → category=work
 
-Family:
-  keywords: ["mom", "dad", "kids", "children", "school", "family", "parents", "sibling"]
-  triggers: "family stuff?", "kids?", "parents?"
-  → action=search, category=family
+Finance: "pay", "bill", "rent", "invoice", "bank", "insurance", "tax", "subscription"
+  → category=finance
 
-Fitness:
-  keywords: ["gym", "workout", "run", "yoga", "exercise", "training"]
-  triggers: "fitness?", "workout?", "gym?"
-  → action=search, category=fitness
+Travel: "flight", "hotel", "trip", "travel", "vacation", "airport", "booking", "visa"
+  → category=travel
 
-=== QUERY UNDERSTANDING ===
-"what do I need to buy?"          → search, keywords=["buy","groceries","shopping","get","purchase","pick up"]
-"when do I have to buy milk?"     → search, keyword="milk", keywords=["milk","buy milk"]
-"any doctor/dentist appointments?"→ search, category=health, keywords=["doctor","dentist","appointment","checkup"]
-"am I free on Friday?"            → list, date_range=null (Friday → compute from current date), datetime=Friday
-"what's on my plate?"             → list, date_range=today
-"what did I plan for this week?"  → list, date_range=this_week
-"what did I complete last week?"  → list, date_range=last_7_days, include_done=true
-"did I finish X?"                 → search, title/keyword=X, include_done=true
-"anything scheduled for tomorrow?"→ list, date_range=tomorrow
-"any urgent tasks?"               → search, priority=high (set in keywords=["urgent","high priority","important","asap","critical"])
-"what's coming up?"               → list, date_range=this_week
-"have I planned anything?"        → list, date_range=all
+Family: "mom", "dad", "kids", "children", "school", "family", "parents"
+  → category=family
 
-=== ADD TASK RULES ===
-"remind me to call mom at 5pm"            → add, title="Call mom", datetime=today 5pm UTC
-"I need to submit report tomorrow"        → add, title="Submit report", datetime=tomorrow 9am
-"don't forget dentist next Monday"        → add, title="Dentist appointment", category=health
-"buy milk today"                          → add, title="Buy milk", category=shopping, datetime=today 9am
-"put team meeting on my calendar Friday"  → add, title="Team meeting", category=work
-"I have to pay rent by the 5th"          → add, title="Pay rent", category=finance, datetime=the 5th
-"schedule gym session tomorrow morning"   → add, title="Gym session", category=fitness
-"book dentist — need to check my tooth"   → add, title="Dentist appointment", category=health, notes="Check tooth pain"
+Fitness: "gym", "workout", "run", "yoga", "exercise", "training"
+  → category=fitness
 
-=== NOTES / PURPOSE EXTRACTION ===
-Extract WHY the user needs this task from their message:
-"remind me to call insurance - claim needs to be filed by Friday" → notes="File claim by Friday"
-"book dentist — need to ask about tooth pain"                     → notes="Ask about tooth pain"
-"add medicine reminder — must take before meals"                  → notes="Take before meals"
-"call mom at 6pm, it's her birthday"                              → notes="Her birthday"
-If no extra context is given, notes=null.
+=== NOTES/PURPOSE EXTRACTION ===
+"book dentist — need to ask about tooth pain"   → notes="Ask about tooth pain"
+"remind me to call insurance, claim by Friday"  → notes="File claim by Friday"
+"add medicine at 8am — take before meals"       → notes="Take before meals"
 
 === DATE RANGE RULES ===
-"last week" / "past week"         → last_7_days
-"last 2 weeks" / "past fortnight" → last_15_days
-"last month" / "past month"       → last_30_days
-"this week"                       → this_week
-"recently" / "lately"             → last_7_days
-"ever" / "all time" / "all"       → all
-"yesterday" (past query)          → last_7_days + include_done=true
+"last week" / "past week"   → last_7_days
+"last 2 weeks" / "fortnight"→ last_15_days
+"last month"                → last_30_days
+"this week"                 → this_week
+"recently"                  → last_7_days
 
-=== INCLUDE_DONE RULES ===
-Set include_done=true when:
-- user asks about past/completed tasks ("what did I complete?", "did I finish?")
-- uses past tense ("what have I done?", "what did I finish last week?")
-- explicitly asks about "completed" or "done" tasks
+=== INCLUDE_DONE ===
+Set include_done=true when user asks about completed, past, or finished tasks.
 
-Return ONLY the JSON. Absolutely no other text."""
+Return ONLY the JSON. No other text whatsoever."""
 
 
 # ---------------------------------------------------------------------------
@@ -153,35 +120,27 @@ Return ONLY the JSON. Absolutely no other text."""
 # ---------------------------------------------------------------------------
 _SYNTH_SYSTEM = """\
 You are a helpful personal assistant with access to the user's task list.
-The user asked a question and relevant tasks have been retrieved from their Notion database.
-Generate a natural, conversational reply that directly answers their question.
+Answer the user's question naturally using the task data provided.
 
 Rules:
-- Answer the question directly — don't say "I found X tasks" or "Here are the tasks"
-- If tasks exist: mention them naturally, include times/dates when relevant
+- Answer directly — don't say "I found X tasks" or "According to Notion"
+- If tasks exist: mention them naturally, include times/dates
 - If no tasks: say so naturally and offer to help create one
-- Be concise but complete — avoid bullet dumps for 1-2 tasks; use bullets for 3+
-- Use a friendly, assistant tone
-- Include a relevant emoji when it feels natural
-- For shopping queries: list the items naturally
-- For time queries ("when do I...?"): answer with the exact time
-- For "am I free?" queries: directly say yes/free or no/busy
-- Do NOT say "Based on your task list" or "According to Notion"
-- Respond as if you simply know the user's schedule"""
+- Be concise — avoid bullet dumps for 1-2 tasks; use bullets for 3+
+- Include a relevant emoji when natural
+- For time queries ("when do I…?"): give the exact time
+- For "am I free?" queries: say yes/no clearly"""
 
 
 async def parse_intent(
     text: str,
     current_time: Optional[str] = None,
     history: Optional[list] = None,
+    user_tz: str = "UTC",
 ) -> Optional[dict]:
-    """
-    Send text to OpenRouter and return a parsed intent dict.
-    history: recent conversation turns for follow-up context.
-    Returns None on any failure.
-    """
+    """Parse user text into a structured intent dict via OpenRouter."""
     now = current_time or datetime.now(timezone.utc).isoformat()
-    user_message = f"Current UTC time: {now}\nUser message: {text}"
+    user_message = f"Current UTC time: {now}\nUser timezone: {user_tz}\nUser message: {text}"
 
     messages: list = [{"role": "system", "content": _INTENT_SYSTEM}]
     if history:
@@ -191,14 +150,13 @@ async def parse_intent(
     try:
         response = await _client.chat.completions.create(
             model=settings.OPENROUTER_MODEL,
-            max_tokens=300,
+            max_tokens=350,
             temperature=0,
             messages=messages,
         )
         raw = response.choices[0].message.content.strip()
         logger.debug("OpenRouter intent raw: %s", raw)
         return _parse_json(raw)
-
     except Exception as exc:
         logger.error("parse_intent failed: %s", exc)
         return None
@@ -209,15 +167,12 @@ async def synthesize_response(
     task_texts: list[str],
     history: Optional[list] = None,
 ) -> str:
-    """
-    Given the user's original question and a list of formatted task strings,
-    generate a natural language answer that directly responds to the question.
-    """
+    """Turn a list of task strings into a natural answer for the user's question."""
     if task_texts:
         tasks_block = "\n".join(task_texts)
-        user_content = f'User asked: "{question}"\n\nRelevant tasks:\n{tasks_block}\n\nAnswer naturally:'
+        user_content = f'Question: "{question}"\n\nTask data:\n{tasks_block}\n\nAnswer:'
     else:
-        user_content = f'User asked: "{question}"\n\nNo matching tasks found.\n\nAnswer naturally:'
+        user_content = f'Question: "{question}"\n\nNo matching tasks found.\n\nAnswer:'
 
     messages: list = [{"role": "system", "content": _SYNTH_SYSTEM}]
     if history:
@@ -232,29 +187,19 @@ async def synthesize_response(
             messages=messages,
         )
         return response.choices[0].message.content.strip()
-
     except Exception as exc:
         logger.error("synthesize_response failed: %s", exc)
-        # Graceful fallback: raw task list
-        if task_texts:
-            return "📋 Here's what I found:\n" + "\n".join(task_texts)
-        return "No matching tasks found."
+        return ("📋 " + "\n".join(task_texts)) if task_texts else "No matching tasks found."
 
 
 async def general_chat(text: str, history: Optional[list] = None) -> str:
-    """
-    Conversational fallback for non-task messages and unrecognised input.
-    Includes conversation history so follow-ups like 'at 5pm' are understood.
-    """
+    """Conversational fallback for non-task messages."""
     _CHAT_SYSTEM = (
         "You are a helpful AI personal assistant and task manager. "
-        "Answer questions naturally and concisely. "
-        "You help users manage their tasks, reminders, and schedules. "
-        "Remember prior messages in this conversation for context. "
-        "If the user wants to manage tasks, give a natural example like: "
-        "'Try saying: add dentist appointment tomorrow at 3pm'"
+        "Answer concisely and naturally. "
+        "Help users manage tasks, reminders, and schedules. "
+        "If they want to add a task, suggest: 'Try: add dentist tomorrow at 3pm'"
     )
-
     messages: list = [{"role": "system", "content": _CHAT_SYSTEM}]
     if history:
         messages.extend(history[-6:])
@@ -277,11 +222,9 @@ async def general_chat(text: str, history: Optional[list] = None) -> str:
 # Helpers
 # ---------------------------------------------------------------------------
 def _parse_json(raw: str) -> Optional[dict]:
-    """Strip markdown fences and parse JSON; validate required keys."""
     raw = raw.strip().strip("`")
     if raw.lower().startswith("json"):
         raw = raw[4:].strip()
-
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
@@ -297,7 +240,6 @@ def _parse_json(raw: str) -> Optional[dict]:
         logger.warning("Unknown action: %s", data["action"])
         return None
 
-    # Ensure keywords is always a list
     if not isinstance(data.get("keywords"), list):
         data["keywords"] = []
 

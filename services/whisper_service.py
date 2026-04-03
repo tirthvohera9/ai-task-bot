@@ -1,11 +1,16 @@
 """
 Voice-to-text via Groq Whisper (free tier).
-Groq offers whisper-large-v3 free at 7,200 audio seconds/day.
+Groq offers whisper-large-v3-turbo free at 7,200 audio seconds/day.
 API is OpenAI-compatible — no extra dependency needed.
+
+Returns (transcribed_text, confidence_score).
+Confidence is derived from segment avg_logprob (0.0–1.0 scale).
 """
 import logging
+import math
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 import httpx
 from openai import AsyncOpenAI
@@ -14,22 +19,19 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-# Groq uses the OpenAI-compatible endpoint
 _client = AsyncOpenAI(
     api_key=settings.GROQ_API_KEY,
     base_url="https://api.groq.com/openai/v1",
 )
 
 
-async def transcribe_voice(file_id: str) -> str:
+async def transcribe_voice(file_id: str) -> tuple[str, float]:
     """
-    1. Resolve file_id → download URL via Telegram getFile.
-    2. Download the .ogg audio.
-    3. Send to Whisper API.
-    4. Return transcribed text.
+    Transcribe a Telegram voice file.
+    Returns (text, confidence) where confidence is 0.0–1.0.
     """
     download_url = await _get_download_url(file_id)
-    audio_bytes = await _download(download_url)
+    audio_bytes  = await _download(download_url)
 
     with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
         tmp.write(audio_bytes)
@@ -38,15 +40,49 @@ async def transcribe_voice(file_id: str) -> str:
     try:
         with open(tmp_path, "rb") as f:
             response = await _client.audio.transcriptions.create(
-                model="whisper-large-v3-turbo",  # Groq free tier model
+                model="whisper-large-v3-turbo",
                 file=f,
-                response_format="text",
+                response_format="verbose_json",   # gives us segments + logprob
             )
-        text = response.strip() if isinstance(response, str) else response.text.strip()
-        logger.info("Whisper transcription: %s", text)
-        return text
+
+        # Extract text
+        if isinstance(response, str):
+            text       = response.strip()
+            confidence = 0.85   # no logprob available, assume decent
+        else:
+            text       = (getattr(response, "text", None) or "").strip()
+            confidence = _compute_confidence(response)
+
+        logger.info("Whisper: '%s' (confidence=%.2f)", text, confidence)
+        return text, confidence
+
+    except Exception as exc:
+        logger.error("Whisper transcription failed: %s", exc)
+        raise
     finally:
         tmp_path.unlink(missing_ok=True)
+
+
+def _compute_confidence(response) -> float:
+    """
+    Convert Whisper segment avg_logprob → a 0–1 confidence score.
+    avg_logprob is negative; closer to 0 = more confident.
+    Typical range: -0.2 (excellent) to -1.5 (poor).
+    """
+    try:
+        segments = getattr(response, "segments", None) or []
+        if not segments:
+            return 0.85
+
+        avg_logprob = sum(
+            getattr(s, "avg_logprob", -0.5) for s in segments
+        ) / len(segments)
+
+        # Map [-2.0, 0.0] → [0.0, 1.0]
+        score = max(0.0, min(1.0, 1.0 + avg_logprob / 2.0))
+        return round(score, 3)
+    except Exception:
+        return 0.85
 
 
 async def _get_download_url(file_id: str) -> str:

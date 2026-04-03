@@ -1,14 +1,15 @@
 """
-Notion integration: database bootstrap + task CRUD + smart queries.
+Notion integration: database bootstrap, schema migration, task CRUD, smart queries.
 Notion is the long-term memory — all tasks live here permanently.
 
-Schema (v2):
-  Name       — title
-  Due        — date
-  Priority   — select (high/medium/low)
-  Status     — select (todo/done)
-  Category   — select (work/personal/health/shopping/finance/travel/family/fitness/other)
-  Notes      — rich_text (context/purpose behind the task)
+Schema (v3):
+  Name        — title
+  Due         — date
+  Priority    — select (high/medium/low)
+  Status      — select (todo/done)
+  Category    — select (work/personal/health/shopping/finance/travel/family/fitness/other)
+  Notes       — rich_text  (context/purpose behind the task)
+  Recurrence  — rich_text  (RRULE-like: "daily", "weekly:MON", "monthly:5", or empty)
 """
 import logging
 from datetime import datetime, timedelta, timezone
@@ -22,16 +23,17 @@ from db.database import get_config, set_config
 logger = logging.getLogger(__name__)
 _notion = AsyncClient(auth=settings.NOTION_API_KEY)
 
-DB_CONFIG_KEY    = "notion_database_id"
-SCHEMA_VER_KEY   = "notion_schema_version"
-SCHEMA_VERSION   = "v2"
+DB_CONFIG_KEY  = "notion_database_id"
+SCHEMA_VER_KEY = "notion_schema_version"
+SCHEMA_VERSION = "v3"
 
-PROP_TITLE    = "Name"
-PROP_DUE      = "Due"
-PROP_PRIORITY = "Priority"
-PROP_STATUS   = "Status"
-PROP_CATEGORY = "Category"
-PROP_NOTES    = "Notes"
+PROP_TITLE      = "Name"
+PROP_DUE        = "Due"
+PROP_PRIORITY   = "Priority"
+PROP_STATUS     = "Status"
+PROP_CATEGORY   = "Category"
+PROP_NOTES      = "Notes"
+PROP_RECURRENCE = "Recurrence"
 
 _CATEGORY_ICONS = {
     "work":     "💼",
@@ -52,8 +54,7 @@ _CATEGORY_ICONS = {
 async def get_or_create_database() -> str:
     db_id = await get_config(DB_CONFIG_KEY)
     if db_id:
-        # Ensure schema is up to date (runs once, cached in Redis)
-        await _ensure_schema_v2(db_id)
+        await _ensure_schema_v3(db_id)
         return db_id
 
     logger.info("Creating Notion tasks database…")
@@ -72,45 +73,40 @@ async def get_or_create_database() -> str:
 def _full_schema() -> dict:
     return {
         PROP_TITLE: {"title": {}},
-        PROP_DUE: {"date": {}},
+        PROP_DUE:   {"date": {}},
         PROP_PRIORITY: {
-            "select": {
-                "options": [
-                    {"name": "high",   "color": "red"},
-                    {"name": "medium", "color": "yellow"},
-                    {"name": "low",    "color": "green"},
-                ]
-            }
+            "select": {"options": [
+                {"name": "high",   "color": "red"},
+                {"name": "medium", "color": "yellow"},
+                {"name": "low",    "color": "green"},
+            ]}
         },
         PROP_STATUS: {
-            "select": {
-                "options": [
-                    {"name": "todo", "color": "gray"},
-                    {"name": "done", "color": "blue"},
-                ]
-            }
+            "select": {"options": [
+                {"name": "todo", "color": "gray"},
+                {"name": "done", "color": "blue"},
+            ]}
         },
         PROP_CATEGORY: {
-            "select": {
-                "options": [
-                    {"name": "work",     "color": "blue"},
-                    {"name": "personal", "color": "purple"},
-                    {"name": "health",   "color": "green"},
-                    {"name": "shopping", "color": "orange"},
-                    {"name": "finance",  "color": "red"},
-                    {"name": "travel",   "color": "yellow"},
-                    {"name": "family",   "color": "pink"},
-                    {"name": "fitness",  "color": "brown"},
-                    {"name": "other",    "color": "gray"},
-                ]
-            }
+            "select": {"options": [
+                {"name": "work",     "color": "blue"},
+                {"name": "personal", "color": "purple"},
+                {"name": "health",   "color": "green"},
+                {"name": "shopping", "color": "orange"},
+                {"name": "finance",  "color": "red"},
+                {"name": "travel",   "color": "yellow"},
+                {"name": "family",   "color": "pink"},
+                {"name": "fitness",  "color": "brown"},
+                {"name": "other",    "color": "gray"},
+            ]}
         },
-        PROP_NOTES: {"rich_text": {}},
+        PROP_NOTES:      {"rich_text": {}},
+        PROP_RECURRENCE: {"rich_text": {}},
     }
 
 
-async def _ensure_schema_v2(db_id: str) -> None:
-    """Add Category + Notes properties to an existing DB (idempotent)."""
+async def _ensure_schema_v3(db_id: str) -> None:
+    """Add Recurrence property to existing DB (idempotent, runs once)."""
     version = await get_config(SCHEMA_VER_KEY)
     if version == SCHEMA_VERSION:
         return
@@ -119,21 +115,20 @@ async def _ensure_schema_v2(db_id: str) -> None:
             database_id=db_id,
             properties={
                 PROP_CATEGORY: {
-                    "select": {
-                        "options": [
-                            {"name": "work",     "color": "blue"},
-                            {"name": "personal", "color": "purple"},
-                            {"name": "health",   "color": "green"},
-                            {"name": "shopping", "color": "orange"},
-                            {"name": "finance",  "color": "red"},
-                            {"name": "travel",   "color": "yellow"},
-                            {"name": "family",   "color": "pink"},
-                            {"name": "fitness",  "color": "brown"},
-                            {"name": "other",    "color": "gray"},
-                        ]
-                    }
+                    "select": {"options": [
+                        {"name": "work",     "color": "blue"},
+                        {"name": "personal", "color": "purple"},
+                        {"name": "health",   "color": "green"},
+                        {"name": "shopping", "color": "orange"},
+                        {"name": "finance",  "color": "red"},
+                        {"name": "travel",   "color": "yellow"},
+                        {"name": "family",   "color": "pink"},
+                        {"name": "fitness",  "color": "brown"},
+                        {"name": "other",    "color": "gray"},
+                    ]}
                 },
-                PROP_NOTES: {"rich_text": {}},
+                PROP_NOTES:      {"rich_text": {}},
+                PROP_RECURRENCE: {"rich_text": {}},
             },
         )
         await set_config(SCHEMA_VER_KEY, SCHEMA_VERSION)
@@ -143,18 +138,19 @@ async def _ensure_schema_v2(db_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Basic CRUD
+# CRUD
 # ---------------------------------------------------------------------------
 async def create_task(
-    title: str,
-    due_iso: Optional[str],
-    priority: str = "medium",
-    category: Optional[str] = None,
-    notes: Optional[str] = None,
+    title:      str,
+    due_iso:    Optional[str],
+    priority:   str = "medium",
+    category:   Optional[str] = None,
+    notes:      Optional[str] = None,
+    recurrence: Optional[str] = None,
 ) -> dict:
     db_id = await get_or_create_database()
     props: dict = {
-        PROP_TITLE:    {"title": [{"text": {"content": title}}]},
+        PROP_TITLE:    {"title":  [{"text": {"content": title}}]},
         PROP_PRIORITY: {"select": {"name": priority}},
         PROP_STATUS:   {"select": {"name": "todo"}},
     }
@@ -164,13 +160,50 @@ async def create_task(
         props[PROP_CATEGORY] = {"select": {"name": category}}
     if notes:
         props[PROP_NOTES] = {"rich_text": [{"text": {"content": notes[:2000]}}]}
+    if recurrence and recurrence != "none":
+        props[PROP_RECURRENCE] = {"rich_text": [{"text": {"content": recurrence}}]}
 
     page = await _notion.pages.create(
         parent={"database_id": db_id},
         properties=props,
     )
-    logger.info("Task created: '%s' cat=%s due=%s", title, category, due_iso)
+    logger.info("Task created: '%s' cat=%s due=%s recurrence=%s", title, category, due_iso, recurrence)
     return page
+
+
+async def update_task(page_id: str, **fields) -> None:
+    """
+    Update arbitrary task fields.
+    Supported kwargs: title, due_iso, priority, category, notes, recurrence, status
+    """
+    props: dict = {}
+
+    if "title" in fields and fields["title"]:
+        props[PROP_TITLE] = {"title": [{"text": {"content": fields["title"]}}]}
+
+    if "due_iso" in fields:
+        val = fields["due_iso"]
+        props[PROP_DUE] = {"date": {"start": val}} if val else {"date": None}
+
+    if "priority" in fields and fields["priority"]:
+        props[PROP_PRIORITY] = {"select": {"name": fields["priority"]}}
+
+    if "category" in fields and fields["category"]:
+        props[PROP_CATEGORY] = {"select": {"name": fields["category"]}}
+
+    if "notes" in fields and fields["notes"]:
+        props[PROP_NOTES] = {"rich_text": [{"text": {"content": str(fields["notes"])[:2000]}}]}
+
+    if "recurrence" in fields:
+        val = fields["recurrence"] or ""
+        props[PROP_RECURRENCE] = {"rich_text": [{"text": {"content": val}}]}
+
+    if "status" in fields and fields["status"]:
+        props[PROP_STATUS] = {"select": {"name": fields["status"]}}
+
+    if props:
+        await _notion.pages.update(page_id=page_id, properties=props)
+        logger.info("Task %s updated: %s", page_id, list(fields.keys()))
 
 
 async def mark_done(page_id: str) -> None:
@@ -185,39 +218,34 @@ async def delete_task(page_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Smart queries — long-term memory retrieval
+# Smart queries
 # ---------------------------------------------------------------------------
 async def list_tasks(
-    filter_date: Optional[str] = None,
+    filter_date:  Optional[str] = None,
     include_done: bool = False,
 ) -> list[dict]:
-    """List tasks, optionally filtered by exact date (YYYY-MM-DD)."""
     db_id = await get_or_create_database()
     conditions: list[dict] = []
-
     if not include_done:
         conditions.append({"property": PROP_STATUS, "select": {"equals": "todo"}})
     if filter_date:
         conditions.append({"property": PROP_DUE, "date": {"equals": filter_date}})
 
-    query_filter = _build_filter(conditions)
     kwargs: dict = {
         "database_id": db_id,
         "sorts": [{"property": PROP_DUE, "direction": "ascending"}],
     }
-    if query_filter:
-        kwargs["filter"] = query_filter
-
-    response = await _notion.databases.query(**kwargs)
-    return response.get("results", [])
+    f = _build_filter(conditions)
+    if f:
+        kwargs["filter"] = f
+    return (await _notion.databases.query(**kwargs)).get("results", [])
 
 
 async def list_tasks_by_date_range(
-    start_date: str,
-    end_date: str,
+    start_date:   str,
+    end_date:     str,
     include_done: bool = True,
 ) -> list[dict]:
-    """Return tasks due between start_date and end_date (YYYY-MM-DD)."""
     db_id = await get_or_create_database()
     conditions: list[dict] = [
         {"property": PROP_DUE, "date": {"on_or_after":  start_date}},
@@ -225,164 +253,181 @@ async def list_tasks_by_date_range(
     ]
     if not include_done:
         conditions.append({"property": PROP_STATUS, "select": {"equals": "todo"}})
-
-    response = await _notion.databases.query(
+    return (await _notion.databases.query(
         database_id=db_id,
         filter={"and": conditions},
         sorts=[{"property": PROP_DUE, "direction": "ascending"}],
-    )
-    return response.get("results", [])
-
-
-async def search_tasks_by_keyword(
-    keyword: str,
-    include_done: bool = False,
-) -> list[dict]:
-    """Search tasks whose title contains the keyword."""
-    db_id = await get_or_create_database()
-    conditions: list[dict] = [
-        {"property": PROP_TITLE, "title": {"contains": keyword}},
-    ]
-    if not include_done:
-        conditions.append({"property": PROP_STATUS, "select": {"equals": "todo"}})
-
-    response = await _notion.databases.query(
-        database_id=db_id,
-        filter={"and": conditions},
-        sorts=[{"property": PROP_DUE, "direction": "ascending"}],
-    )
-    return response.get("results", [])
+    )).get("results", [])
 
 
 async def search_tasks_multi(
-    keywords: Optional[list[str]] = None,
-    category: Optional[str] = None,
+    keywords:     Optional[list[str]] = None,
+    category:     Optional[str] = None,
     include_done: bool = False,
-    date_range: Optional[str] = None,
+    date_range:   Optional[str] = None,
 ) -> list[dict]:
     """
-    Search tasks matching ANY of the keywords OR the given category.
-    Also applies optional date range filtering.
-    Deduplicates results by page ID.
+    Search tasks matching ANY keyword OR the given category.
+    Applies optional date range. Deduplicates and sorts by due date.
     """
     db_id = await get_or_create_database()
     all_results: dict[str, dict] = {}
-
-    # Build date range conditions
     now = datetime.now(timezone.utc)
-    date_conditions: list[dict] = []
-    if date_range:
-        if date_range == "today":
-            date_conditions = [{"property": PROP_DUE, "date": {"equals": now.strftime("%Y-%m-%d")}}]
-        elif date_range == "tomorrow":
-            tom = (now + timedelta(days=1)).strftime("%Y-%m-%d")
-            date_conditions = [{"property": PROP_DUE, "date": {"equals": tom}}]
-        elif date_range == "this_week":
-            start = (now - timedelta(days=now.weekday())).strftime("%Y-%m-%d")
-            end = (now + timedelta(days=6 - now.weekday())).strftime("%Y-%m-%d")
-            date_conditions = [
-                {"property": PROP_DUE, "date": {"on_or_after": start}},
-                {"property": PROP_DUE, "date": {"on_or_before": end}},
-            ]
-        elif date_range in ("last_7_days", "last_15_days", "last_30_days"):
-            days = int(date_range.split("_")[1])
-            start = (now - timedelta(days=days)).strftime("%Y-%m-%d")
-            end = now.strftime("%Y-%m-%d")
-            date_conditions = [
-                {"property": PROP_DUE, "date": {"on_or_after": start}},
-                {"property": PROP_DUE, "date": {"on_or_before": end}},
-            ]
 
-    status_condition = (
-        [] if include_done
-        else [{"property": PROP_STATUS, "select": {"equals": "todo"}}]
-    )
+    date_conditions = _date_range_conditions(date_range, now)
+    status_cond     = [] if include_done else [{"property": PROP_STATUS, "select": {"equals": "todo"}}]
 
-    # Search by each keyword separately (Notion OR is available but limited)
-    search_terms = list(keywords or [])
-
-    for term in search_terms[:6]:  # cap at 6 API calls
+    for term in (keywords or [])[:6]:
         if not term or not term.strip():
             continue
-        conditions = (
-            [{"property": PROP_TITLE, "title": {"contains": term}}]
-            + status_condition
-            + date_conditions
-        )
+        conds = [{"property": PROP_TITLE, "title": {"contains": term}}] + status_cond + date_conditions
         try:
             resp = await _notion.databases.query(
                 database_id=db_id,
-                filter=_build_filter(conditions),
+                filter=_build_filter(conds),
                 sorts=[{"property": PROP_DUE, "direction": "ascending"}],
             )
-            for page in resp.get("results", []):
-                all_results[page["id"]] = page
+            for p in resp.get("results", []):
+                all_results[p["id"]] = p
         except Exception as exc:
             logger.warning("search term '%s' failed: %s", term, exc)
 
-    # Also search by category if provided
     if category and category in _CATEGORY_ICONS:
-        conditions = (
-            [{"property": PROP_CATEGORY, "select": {"equals": category}}]
-            + status_condition
-            + date_conditions
-        )
+        conds = [{"property": PROP_CATEGORY, "select": {"equals": category}}] + status_cond + date_conditions
         try:
             resp = await _notion.databases.query(
                 database_id=db_id,
-                filter=_build_filter(conditions),
+                filter=_build_filter(conds),
                 sorts=[{"property": PROP_DUE, "direction": "ascending"}],
             )
-            for page in resp.get("results", []):
-                all_results[page["id"]] = page
+            for p in resp.get("results", []):
+                all_results[p["id"]] = p
         except Exception as exc:
             logger.warning("category search '%s' failed: %s", category, exc)
 
-    # Sort combined results by due date
-    results = list(all_results.values())
-    results.sort(key=lambda p: (
-        p.get("properties", {}).get(PROP_DUE, {}).get("date", {}) or {}
-    ).get("start") or "9999")
-
+    results = sorted(
+        all_results.values(),
+        key=lambda p: (
+            (p.get("properties", {}).get(PROP_DUE, {}).get("date") or {}).get("start") or "9999"
+        ),
+    )
     return results
 
 
 async def find_task_by_title(title: str) -> Optional[dict]:
     """Return the first todo task whose title contains the string."""
     db_id = await get_or_create_database()
-    response = await _notion.databases.query(
+    resp = await _notion.databases.query(
         database_id=db_id,
-        filter={
-            "and": [
-                {"property": PROP_TITLE, "title": {"contains": title}},
-                {"property": PROP_STATUS, "select": {"equals": "todo"}},
-            ]
-        },
+        filter={"and": [
+            {"property": PROP_TITLE,  "title":  {"contains": title}},
+            {"property": PROP_STATUS, "select": {"equals": "todo"}},
+        ]},
     )
-    results = response.get("results", [])
+    results = resp.get("results", [])
     return results[0] if results else None
 
 
 async def get_due_soon(within_minutes: int = 15) -> list[dict]:
-    """Return todo tasks due within the next N minutes."""
+    """Todo tasks due within the next N minutes."""
     now = datetime.now(timezone.utc)
     end = now + timedelta(minutes=within_minutes)
     db_id = await get_or_create_database()
-    response = await _notion.databases.query(
+    resp = await _notion.databases.query(
         database_id=db_id,
-        filter={
-            "and": [
-                {"property": PROP_STATUS, "select": {"equals": "todo"}},
-                {"property": PROP_DUE,    "date": {"on_or_after":  now.isoformat()}},
-                {"property": PROP_DUE,    "date": {"on_or_before": end.isoformat()}},
-            ]
-        },
+        filter={"and": [
+            {"property": PROP_STATUS, "select": {"equals": "todo"}},
+            {"property": PROP_DUE,    "date":   {"on_or_after":  now.isoformat()}},
+            {"property": PROP_DUE,    "date":   {"on_or_before": end.isoformat()}},
+        ]},
     )
-    return response.get("results", [])
+    return resp.get("results", [])
+
+
+async def list_recurring_tasks() -> list[dict]:
+    """All todo tasks that have a recurrence rule set."""
+    db_id = await get_or_create_database()
+    resp = await _notion.databases.query(
+        database_id=db_id,
+        filter={"and": [
+            {"property": PROP_STATUS, "select": {"equals": "done"}},
+            {"property": PROP_RECURRENCE, "rich_text": {"is_not_empty": True}},
+        ]},
+    )
+    return resp.get("results", [])
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Recurrence helpers
+# ---------------------------------------------------------------------------
+def next_recurrence_date(recurrence: str, from_dt: datetime) -> Optional[datetime]:
+    """
+    Given an RRULE-like string, return the next occurrence after from_dt.
+    Formats: "daily", "weekly:MON", "monthly:5"
+    """
+    r = recurrence.lower().strip()
+    if r == "daily":
+        return from_dt + timedelta(days=1)
+
+    if r.startswith("weekly:"):
+        day_names = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+        day_str = r.split(":")[1][:3]
+        target = day_names.get(day_str)
+        if target is None:
+            return None
+        days_ahead = (target - from_dt.weekday()) % 7 or 7
+        return from_dt + timedelta(days=days_ahead)
+
+    if r.startswith("monthly:"):
+        try:
+            target_day = int(r.split(":")[1])
+            next_month = from_dt.month % 12 + 1
+            yr = from_dt.year + (1 if from_dt.month == 12 else 0)
+            return from_dt.replace(year=yr, month=next_month, day=target_day)
+        except (ValueError, TypeError):
+            return None
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Formatting
+# ---------------------------------------------------------------------------
+def task_to_text(page: dict, user_tz: str = "UTC") -> str:
+    """Format a Notion page as a readable task string."""
+    from utils.datetime_parser import format_local
+
+    props      = page.get("properties", {})
+    title      = _get_title(props)
+    due        = _get_date(props)
+    priority   = _get_select(props, PROP_PRIORITY)
+    status     = _get_select(props, PROP_STATUS)
+    category   = _get_select(props, PROP_CATEGORY)
+    notes      = _get_rich_text(props, PROP_NOTES)
+    recurrence = _get_rich_text(props, PROP_RECURRENCE)
+
+    status_icon = "✅" if status == "done" else "•"
+    cat_icon    = _CATEGORY_ICONS.get(category, "") if category else ""
+    prefix      = f"{status_icon} {cat_icon}".strip()
+    line        = f"{prefix} *{title}*"
+
+    if due:
+        line += f" — {format_local(due, user_tz)}"
+
+    if priority and priority != "medium":
+        line += f" [{'🔴' if priority == 'high' else '🟢'} {priority}]"
+
+    if recurrence and recurrence != "none":
+        line += f" ♻️ _{recurrence}_"
+
+    if notes:
+        line += f"\n  ↳ _{notes}_"
+
+    return line
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
 # ---------------------------------------------------------------------------
 def _build_filter(conditions: list[dict]) -> dict:
     if not conditions:
@@ -392,42 +437,31 @@ def _build_filter(conditions: list[dict]) -> dict:
     return {"and": conditions}
 
 
-def task_to_text(page: dict) -> str:
-    """Format a Notion page as a readable task string."""
-    props    = page.get("properties", {})
-    title    = _get_title(props)
-    due      = _get_date(props)
-    priority = _get_select(props, PROP_PRIORITY)
-    status   = _get_select(props, PROP_STATUS)
-    category = _get_select(props, PROP_CATEGORY)
-    notes    = _get_rich_text(props, PROP_NOTES)
-
-    status_icon = "✅" if status == "done" else "•"
-    cat_icon    = _CATEGORY_ICONS.get(category, "") if category else ""
-
-    # Build the main line
-    prefix = f"{status_icon} {cat_icon}".strip()
-    line   = f"{prefix} *{title}*"
-
-    # Format due date nicely
-    if due:
-        try:
-            dt = datetime.fromisoformat(due)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            formatted = dt.strftime("%-d %b at %-I:%M %p UTC")
-        except Exception:
-            formatted = due
-        line += f" — {formatted}"
-
-    if priority and priority != "medium":
-        priority_labels = {"high": "🔴 high", "low": "🟢 low"}
-        line += f" [{priority_labels.get(priority, priority)}]"
-
-    if notes:
-        line += f"\n  ↳ _{notes}_"
-
-    return line
+def _date_range_conditions(date_range: Optional[str], now: datetime) -> list[dict]:
+    if not date_range:
+        return []
+    if date_range == "today":
+        d = now.strftime("%Y-%m-%d")
+        return [{"property": PROP_DUE, "date": {"equals": d}}]
+    if date_range == "tomorrow":
+        d = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+        return [{"property": PROP_DUE, "date": {"equals": d}}]
+    if date_range == "this_week":
+        start = (now - timedelta(days=now.weekday())).strftime("%Y-%m-%d")
+        end   = (now + timedelta(days=6 - now.weekday())).strftime("%Y-%m-%d")
+        return [
+            {"property": PROP_DUE, "date": {"on_or_after":  start}},
+            {"property": PROP_DUE, "date": {"on_or_before": end}},
+        ]
+    if date_range in ("last_7_days", "last_15_days", "last_30_days"):
+        days  = int(date_range.split("_")[1])
+        start = (now - timedelta(days=days)).strftime("%Y-%m-%d")
+        end   = now.strftime("%Y-%m-%d")
+        return [
+            {"property": PROP_DUE, "date": {"on_or_after":  start}},
+            {"property": PROP_DUE, "date": {"on_or_before": end}},
+        ]
+    return []
 
 
 def _get_title(props: dict) -> str:
