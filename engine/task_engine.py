@@ -8,6 +8,7 @@ from typing import Optional
 
 from db.database import log_behavior
 from engine.router import route
+from services.ai_service import general_chat
 from services.notion_service import (
     create_task,
     delete_task,
@@ -27,20 +28,9 @@ async def handle_message(text: str, user_id: str) -> str:
     """Main entry point: text → response string."""
     intent = await route(text)
 
-    if intent is None:
-        return (
-            "Sorry, I couldn't understand that. Try something like:\n"
-            "• _Add meeting at 3pm tomorrow_\n"
-            "• _Show today's tasks_\n"
-            "• _Done with report_"
-        )
-
-    confidence = intent.get("confidence", 1.0)
-    if confidence < CONFIDENCE_THRESHOLD:
-        return (
-            f"I'm not sure what you mean (confidence: {confidence:.0%}). "
-            "Could you rephrase? E.g. _Add [task] at [time]_"
-        )
+    # No task intent found → fall back to general conversation
+    if intent is None or intent.get("confidence", 1.0) < CONFIDENCE_THRESHOLD:
+        return await general_chat(text)
 
     action = intent["action"]
 

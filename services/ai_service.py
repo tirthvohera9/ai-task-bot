@@ -69,6 +69,35 @@ async def parse_intent(text: str, current_time: Optional[str] = None) -> Optiona
         return None
 
 
+async def general_chat(text: str) -> str:
+    """
+    Conversational fallback for non-task messages.
+    Used when regex + intent parsing both fail to find a task action.
+    """
+    try:
+        response = await _client.chat.completions.create(
+            model=settings.OPENROUTER_MODEL,
+            max_tokens=300,
+            temperature=0.7,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a helpful AI assistant and personal task manager. "
+                        "Answer general questions naturally and concisely. "
+                        "If the user seems to want to manage tasks, remind them they can say things like "
+                        "'Add meeting at 3pm' or 'Show today's tasks'."
+                    ),
+                },
+                {"role": "user", "content": text},
+            ],
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as exc:
+        logger.error("OpenRouter general_chat failed: %s", exc)
+        return "Sorry, I couldn't process that right now. Please try again."
+
+
 def _parse_json(raw: str) -> Optional[dict]:
     # Strip accidental markdown fences
     raw = raw.strip().strip("`")
