@@ -10,7 +10,7 @@ class Settings(BaseSettings):
 
     # OpenRouter — brain for everything
     OPENROUTER_API_KEY: str
-    OPENROUTER_MODEL: str = "openai/gpt-4o-mini"
+    OPENROUTER_MODEL: str = "qwen/qwen3-8b:free"
 
     # Groq — free Whisper transcription
     GROQ_API_KEY: str
