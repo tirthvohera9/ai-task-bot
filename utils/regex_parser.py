@@ -1,10 +1,9 @@
 """
-Regex-based intent detection.
-Returns a ParseResult if the input is unambiguous, otherwise None
-(caller must escalate to Claude).
+Regex-based intent detection — handles common, unambiguous phrasings only.
+Anything uncertain is passed to the AI (OpenRouter) for deeper understanding.
 """
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 from utils.datetime_parser import extract_datetime
@@ -12,62 +11,92 @@ from utils.datetime_parser import extract_datetime
 
 @dataclass
 class ParseResult:
-    action: str                       # add | list | delete | done | update
+    action: str                        # add | list | delete | done
     title: str = ""
     datetime_iso: Optional[str] = None
-    priority: str = "medium"          # low | medium | high
+    priority: str = "medium"
     confidence: float = 1.0
     raw_text: str = ""
 
 
 # ---------------------------------------------------------------------------
-# Action keyword patterns
+# Action patterns
 # ---------------------------------------------------------------------------
+
+# ADD — explicit "add/create/remind/schedule" AND implicit "I need to / don't forget"
 _ADD = re.compile(
-    r"^(add|create|new|remind|schedule|set)\b",
-    re.IGNORECASE,
-)
-_LIST = re.compile(
-    r"^(list|show|get|what('?s| is)|display|tell me)\b"
-    r"|"
-    r"\b(today'?s?|tomorrow'?s?)\s+(tasks?|todos?|reminders?)\b",
-    re.IGNORECASE,
-)
-_DELETE = re.compile(
-    r"^(delete|remove|cancel|drop)\b",
-    re.IGNORECASE,
-)
-_DONE = re.compile(
-    r"^(done|finish(ed)?|complet(e|ed)|mark\s+(as\s+)?done)\b",
+    r"^(add|create|new|schedule|set\s+(a\s+)?(reminder|task|alarm)|"
+    r"remind(\s+me(\s+to)?)?|note(\s+down)?|book|"
+    r"i\s+need\s+to\s+(?!check|see|know|find|look|ask)|"  # "I need to X" (exclude queries)
+    r"i\s+have\s+to\s+(?!check|see|know|find|look|ask)|"
+    r"don'?t\s+forget(\s+to)?|gotta\s+|"
+    r"i\s+should\s+(?!check|see|know|find|look|ask)|"
+    r"put(\s+it)?\s+on\s+(my\s+)?(list|calendar))\b",
     re.IGNORECASE,
 )
 
-# Priority keywords inside the message
+# LIST — conservative: only explicit "list/show tasks" patterns
+# Anything like "show milk" or "show doctor" should go to AI as a search
+_LIST = re.compile(
+    r"^(list|show|display|get)\s+(all\s+)?(my\s+)?(tasks?|todos?|reminders?|schedule|everything)\b"
+    r"|"
+    r"\b(today'?s?|tomorrow'?s?)\s+(tasks?|todos?|reminders?|schedule)\b"
+    r"|"
+    r"^what\s+(?:do\s+i\s+have\s+|is\s+on\s+my\s+)?(?:today|tomorrow)\??$"
+    r"|"
+    r"^(show|list)\s+(today|tomorrow)\b",
+    re.IGNORECASE,
+)
+
+# DELETE — explicit removal verbs
+_DELETE = re.compile(
+    r"^(delete|remove|cancel|drop|clear|erase)\b",
+    re.IGNORECASE,
+)
+
+# DONE — explicit completion + natural "I did / I finished / just completed"
+_DONE = re.compile(
+    r"^(done|finish(ed)?|complet(e|ed)|mark\s+(?:as\s+)?done|"
+    r"i\s+(?:did|finished|completed|have\s+done|'?ve\s+(?:done|finished|completed))|"
+    r"just\s+(?:finished|completed|done)|"
+    r"(?:already\s+)?(?:finished|completed)\s+(?:the\s+)?)\b",
+    re.IGNORECASE,
+)
+
+# Priority keywords
 _PRIORITY_RE = re.compile(
-    r"\b(urgent|critical|asap|high|important|low|minor|low[- ]priority)\b",
+    r"\b(urgent|critical|asap|high[\s-]?priority|important|low[\s-]?priority|low|minor)\b",
     re.IGNORECASE,
 )
 _PRIORITY_MAP = {
     "urgent": "high", "critical": "high", "asap": "high",
-    "high": "high", "important": "high",
-    "low": "low", "minor": "low", "low-priority": "low", "low priority": "low",
+    "high priority": "high", "high-priority": "high", "important": "high",
+    "low": "low", "minor": "low", "low priority": "low", "low-priority": "low",
 }
 
-# Tokens to strip when extracting a clean title
+# Tokens to strip when building a clean title
 _NOISE_RE = re.compile(
-    r"^(add|create|new|remind\s+(me\s+)?to|schedule|set|delete|remove|"
-    r"cancel|done|finish|complete|mark\s+as\s+done|list|show|get|display)\s*",
+    r"^(add|create|new|remind(\s+me(\s+to)?)?|schedule|set(\s+a)?\s*(reminder|task|alarm)?|"
+    r"delete|remove|cancel|drop|clear|erase|"
+    r"done|finish(ed)?|complete(d)?|mark(\s+as)?\s+done|"
+    r"list|show|display|get|"
+    r"i\s+(need|have)\s+to|don'?t\s+forget(\s+to)?|gotta|i\s+should|"
+    r"put(\s+it)?\s+on\s+(my\s+)?(list|calendar)|"
+    r"note(\s+down)?|book|i\s+(did|finished|completed)|i'?ve\s+(done|finished|completed)|"
+    r"just\s+(finished|completed|done)|already\s+(finished|completed))\s*",
     re.IGNORECASE,
 )
 _TIME_TOKENS_RE = re.compile(
-    r"\b(today|tomorrow|at\s+\d{1,2}(:\d{2})?\s*(am|pm)?|"
-    r"in\s+\d+\s+(minute|hour|day)s?|"
-    r"next\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)|"
-    r"(this\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b",
+    r"\b(today|tomorrow|tonight|this\s+(morning|afternoon|evening|week|weekend)|"
+    r"next\s+(week|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|"
+    r"at\s+\d{1,2}(:\d{2})?\s*(am|pm)?|"
+    r"in\s+\d+\s+(minute|hour|day|week|month)s?|"
+    r"(this\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)|"
+    r"end\s+of\s+(the\s+)?(week|month))\b",
     re.IGNORECASE,
 )
 _PRIORITY_TOKEN_RE = re.compile(
-    r"\b(urgent|critical|asap|high\s+priority|low\s+priority|low|minor|important)\b",
+    r"\b(urgent|critical|asap|high[\s-]?priority|low[\s-]?priority|low|minor|important)\b",
     re.IGNORECASE,
 )
 
@@ -84,27 +113,27 @@ def _clean_title(text: str) -> str:
     title = _NOISE_RE.sub("", text).strip()
     title = _TIME_TOKENS_RE.sub("", title).strip()
     title = _PRIORITY_TOKEN_RE.sub("", title).strip()
-    # Collapse multiple spaces
-    return re.sub(r"\s{2,}", " ", title).strip(" ,.")
+    # strip trailing punctuation and collapse spaces
+    title = re.sub(r"\s{2,}", " ", title).strip(" ,.")
+    return title
 
 
 def parse(text: str) -> Optional[ParseResult]:
     """
     Attempt deterministic parsing.
-    Returns ParseResult on success, None if intent is ambiguous.
+    Returns ParseResult on success, None if intent is ambiguous (→ escalate to AI).
     """
     stripped = text.strip()
 
-    # --- LIST ---
+    # --- LIST (conservative) ---
     if _LIST.search(stripped):
-        # No datetime needed for list commands
         return ParseResult(action="list", raw_text=stripped)
 
     # --- ADD ---
     if _ADD.match(stripped):
         title = _clean_title(stripped)
-        if not title:
-            return None  # title required; escalate to Claude
+        if not title or len(title) < 2:
+            return None  # no usable title — let AI handle it
         dt = extract_datetime(stripped)
         priority = _extract_priority(stripped)
         return ParseResult(
@@ -129,5 +158,5 @@ def parse(text: str) -> Optional[ParseResult]:
             return None
         return ParseResult(action="done", title=title, raw_text=stripped)
 
-    # Cannot determine intent deterministically
+    # Anything else: let AI figure it out
     return None
