@@ -79,26 +79,28 @@ async def cron_summary(authorization: str | None = Header(default=None)) -> dict
 # Setup — call once after deploying to register the Telegram webhook
 # ---------------------------------------------------------------------------
 @app.get("/setup")
-async def setup(authorization: str | None = Header(default=None)) -> dict:
-    """Register the Telegram webhook URL. Secure with CRON_SECRET header."""
+async def setup(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """
+    Register the Telegram webhook URL.
+    Secured with CRON_SECRET header.
+    Uses the incoming request's host as the webhook base URL
+    so it always points to the production domain.
+    """
     if not _verify_cron(authorization):
         return Response(status_code=401)  # type: ignore[return-value]
 
+    # Build webhook URL from the actual request host (always correct)
+    host = request.headers.get("x-forwarded-host") or request.url.hostname
+    webhook_url = f"https://{host}/webhook"
+
     bot_app = Application.builder().token(settings.TELEGRAM_BOT_TOKEN).build()
     await bot_app.initialize()
-
-    # Derive webhook URL from Vercel's VERCEL_URL env var if available,
-    # otherwise build it from the request host.
-    import os
-    vercel_url = os.environ.get("VERCEL_URL", "")
-    webhook_url = f"https://{vercel_url}/webhook" if vercel_url else ""
-
-    if not webhook_url:
-        await bot_app.shutdown()
-        return {"ok": False, "error": "VERCEL_URL not set"}
-
     await bot_app.bot.set_webhook(url=webhook_url)
     await bot_app.shutdown()
+
     logger.info("Webhook registered: %s", webhook_url)
     return {"ok": True, "webhook_url": webhook_url}
 
