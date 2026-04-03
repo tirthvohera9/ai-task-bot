@@ -26,26 +26,31 @@ CONFIDENCE_THRESHOLD = 0.6
 
 async def handle_message(text: str, user_id: str) -> str:
     """Main entry point: text → response string."""
-    intent = await route(text)
+    try:
+        intent = await route(text)
 
-    # No task intent found → fall back to general conversation
-    if intent is None or intent.get("confidence", 1.0) < CONFIDENCE_THRESHOLD:
+        # No task intent found → fall back to general conversation
+        if intent is None or intent.get("confidence", 1.0) < CONFIDENCE_THRESHOLD:
+            return await general_chat(text)
+
+        action = intent["action"]
+
+        if action == "add":
+            return await _add(intent, user_id)
+        elif action == "list":
+            return await _list(intent)
+        elif action == "delete":
+            return await _delete(intent, user_id)
+        elif action == "done":
+            return await _done(intent, user_id)
+        elif action == "update":
+            return "Updates aren't supported yet. Delete and recreate the task."
+        else:
+            return await general_chat(text)
+
+    except Exception as exc:
+        logger.exception("handle_message error for '%s': %s", text, exc)
         return await general_chat(text)
-
-    action = intent["action"]
-
-    if action == "add":
-        return await _add(intent, user_id)
-    elif action == "list":
-        return await _list(intent)
-    elif action == "delete":
-        return await _delete(intent, user_id)
-    elif action == "done":
-        return await _done(intent, user_id)
-    elif action == "update":
-        return "Updates aren't supported yet. Delete and recreate the task."
-    else:
-        return f"Unknown action: {action}"
 
 
 # ---------------------------------------------------------------------------

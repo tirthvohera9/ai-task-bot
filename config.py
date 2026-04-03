@@ -10,7 +10,7 @@ class Settings(BaseSettings):
 
     # OpenRouter — brain for everything
     OPENROUTER_API_KEY: str
-    OPENROUTER_MODEL: str = "qwen/qwen3-8b:free"
+    OPENROUTER_MODEL: str = "meta-llama/llama-3.1-8b-instruct:free"
 
     # Groq — free Whisper transcription
     GROQ_API_KEY: str
