@@ -144,7 +144,7 @@ async def handle_message(text: str, user_id: str, history: Optional[list] = None
 
     # ── 3. Route and dispatch ────────────────────────────────────────────────
     try:
-        intent = await route(text, history=history)
+        intent = await route(text, history=history, user_tz=user_tz)
 
         if intent is None or intent.get("confidence", 1.0) < CONFIDENCE_THRESHOLD:
             return await _chat_fallback(text, user_id, history)

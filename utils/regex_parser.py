@@ -14,6 +14,7 @@ class ParseResult:
     action: str                        # add | list | delete | done
     title: str = ""
     datetime_iso: Optional[str] = None
+    date_range: Optional[str] = None   # today | tomorrow | this_week | all
     priority: str = "medium"
     confidence: float = 1.0
     raw_text: str = ""
@@ -44,9 +45,40 @@ _LIST = re.compile(
     r"|"
     r"^what\s+(?:do\s+i\s+have\s+|is\s+on\s+my\s+)?(?:today|tomorrow)\??$"
     r"|"
-    r"^(show|list)\s+(today|tomorrow)\b",
+    r"^(show|list)\s+(today|tomorrow)\b"
+    r"|"
+    # Short follow-up queries: "for tomorrow?", "tomorrow?", "what about tomorrow?"
+    r"^(?:for\s+|what\s+about\s+)?(today|tomorrow|this\s+week)\?*$",
     re.IGNORECASE,
 )
+
+# Extracts a date range hint from list/follow-up text
+_DATE_RANGE_RE = re.compile(
+    r"\b(today|tomorrow|this\s+week|this\s+weekend|all|everything|"
+    r"last\s+7\s+days|last\s+week|last\s+15\s+days|last\s+month|last\s+30\s+days)\b",
+    re.IGNORECASE,
+)
+_DATE_RANGE_MAP = {
+    "today":         "today",
+    "tomorrow":      "tomorrow",
+    "this week":     "this_week",
+    "this weekend":  "this_week",
+    "all":           "all",
+    "everything":    "all",
+    "last 7 days":   "last_7_days",
+    "last week":     "last_7_days",
+    "last 15 days":  "last_15_days",
+    "last month":    "last_30_days",
+    "last 30 days":  "last_30_days",
+}
+
+
+def _extract_date_range(text: str) -> Optional[str]:
+    m = _DATE_RANGE_RE.search(text)
+    if not m:
+        return None
+    key = re.sub(r"\s+", " ", m.group(1).lower().strip())
+    return _DATE_RANGE_MAP.get(key)
 
 # DELETE — explicit removal verbs
 _DELETE = re.compile(
@@ -118,23 +150,28 @@ def _clean_title(text: str) -> str:
     return title
 
 
-def parse(text: str) -> Optional[ParseResult]:
+def parse(text: str, user_tz: str = "UTC") -> Optional[ParseResult]:
     """
     Attempt deterministic parsing.
     Returns ParseResult on success, None if intent is ambiguous (→ escalate to AI).
+    user_tz is passed to extract_datetime so times are correctly localised.
     """
     stripped = text.strip()
 
     # --- LIST (conservative) ---
     if _LIST.search(stripped):
-        return ParseResult(action="list", raw_text=stripped)
+        return ParseResult(
+            action="list",
+            date_range=_extract_date_range(stripped),
+            raw_text=stripped,
+        )
 
     # --- ADD ---
     if _ADD.match(stripped):
         title = _clean_title(stripped)
         if not title or len(title) < 2:
             return None  # no usable title — let AI handle it
-        dt = extract_datetime(stripped)
+        dt = extract_datetime(stripped, user_tz=user_tz)
         priority = _extract_priority(stripped)
         return ParseResult(
             action="add",

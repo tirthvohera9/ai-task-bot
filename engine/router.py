@@ -34,7 +34,7 @@ _NO_CACHE_RE = _re.compile(
 )
 
 
-async def route(text: str, history: Optional[list] = None) -> Optional[dict]:
+async def route(text: str, history: Optional[list] = None, user_tz: str = "UTC") -> Optional[dict]:
     """
     Returns a dict matching the intent schema, or None if unresolvable.
 
@@ -63,7 +63,7 @@ async def route(text: str, history: Optional[list] = None) -> Optional[dict]:
             return cached
 
     # ── 2. Deterministic regex parse ──────────────────────────────────────
-    result: Optional[ParseResult] = parse(normalised)
+    result: Optional[ParseResult] = parse(normalised, user_tz=user_tz)
     if result is not None:
         intent = {
             **asdict(result),
@@ -81,7 +81,7 @@ async def route(text: str, history: Optional[list] = None) -> Optional[dict]:
     # ── 3. Claude fallback ────────────────────────────────────────────────
     logger.info("Escalating to Claude for: %s", normalised)
     now = datetime.now(timezone.utc).isoformat()
-    claude_result = await parse_intent(normalised, current_time=now, history=history)
+    claude_result = await parse_intent(normalised, current_time=now, history=history, user_tz=user_tz)
 
     if claude_result is None:
         logger.warning("Claude could not parse: %s", normalised)
