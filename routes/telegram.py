@@ -5,6 +5,7 @@ Commands: /start, /help, /summary, /clear, /timezone
 Messages: text, voice
 """
 import logging
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from telegram import Update
@@ -193,8 +194,7 @@ async def _voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         history = await get_history(user_id)
         from services.ai_service import parse_intent
-        from datetime import timezone
-        now    = __import__("datetime").datetime.now(timezone.utc).isoformat()
+        now    = datetime.now(timezone.utc).isoformat()
         intent = await parse_intent(transcribed, current_time=now, history=history)
 
         if intent and intent.get("action") == "add" and intent.get("title"):

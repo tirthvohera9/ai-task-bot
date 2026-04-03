@@ -6,6 +6,7 @@
     { "src": "/(.*)", "dest": "main.py" }
   ],
   "crons": [
-    { "path": "/cron/summary", "schedule": "0 8 * * *" }
+    { "path": "/cron/reminders", "schedule": "* * * * *" },
+    { "path": "/cron/summary",   "schedule": "30 2 * * *" }
   ]
 }

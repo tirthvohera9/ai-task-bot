@@ -19,6 +19,21 @@ from utils.regex_parser import ParseResult, parse
 logger = logging.getLogger(__name__)
 
 
+import re as _re
+
+# Inputs that are context-dependent must never be cached — their meaning
+# changes based on what was shown last (pronoun or number reference).
+_NO_CACHE_RE = _re.compile(
+    r"^\s*(?:"
+    r"\d+"                                          # bare number: "1", "2"
+    r"|(?:delete|done|remove|complete|move|reschedule|update|mark)\s+"
+    r"(?:it|that|this|one|\d+)\b"                  # "delete it", "done 2"
+    r"|(?:it|that|this)\s+(?:is|was|done|complete)" # "that is done"
+    r")\s*$",
+    _re.IGNORECASE,
+)
+
+
 async def route(text: str, history: Optional[list] = None) -> Optional[dict]:
     """
     Returns a dict matching the intent schema, or None if unresolvable.
@@ -36,12 +51,16 @@ async def route(text: str, history: Optional[list] = None) -> Optional[dict]:
     """
     normalised = text.strip()
 
+    # Context-dependent inputs must bypass cache entirely
+    cacheable = not _NO_CACHE_RE.match(normalised)
+
     # ── 1. Cache lookup ───────────────────────────────────────────────────
-    cached = await get_cached(normalised)
-    if cached:
-        logger.debug("Cache hit for: %s", normalised)
-        cached["source"] = "cache"
-        return cached
+    if cacheable:
+        cached = await get_cached(normalised)
+        if cached:
+            logger.debug("Cache hit for: %s", normalised)
+            cached["source"] = "cache"
+            return cached
 
     # ── 2. Deterministic regex parse ──────────────────────────────────────
     result: Optional[ParseResult] = parse(normalised)
@@ -52,11 +71,11 @@ async def route(text: str, history: Optional[list] = None) -> Optional[dict]:
             "entity": None,
             "source": "regex",
         }
-        # Remove the dataclass-specific key
         intent.pop("datetime_iso", None)
         intent.pop("raw_text", None)
         logger.info("Regex parsed action=%s title=%s", intent["action"], intent["title"])
-        await set_cache(normalised, intent)
+        if cacheable:
+            await set_cache(normalised, intent)
         return intent
 
     # ── 3. Claude fallback ────────────────────────────────────────────────
@@ -69,5 +88,6 @@ async def route(text: str, history: Optional[list] = None) -> Optional[dict]:
         return None
 
     claude_result["source"] = "claude"
-    await set_cache(normalised, claude_result)
+    if cacheable:
+        await set_cache(normalised, claude_result)
     return claude_result

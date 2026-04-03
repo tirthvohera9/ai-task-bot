@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from telegram import Bot
 
 from config import settings
-from db.database import is_reminder_sent, mark_reminder_sent
+from db.database import get_user_timezone, is_reminder_sent, mark_reminder_sent
 from services.notion_service import (
     get_due_soon,
     list_tasks,
@@ -74,7 +74,6 @@ async def send_reminders() -> int:
             if await is_reminder_sent(page_id, slot=slot_name):
                 continue
 
-            text = task_to_text(page)
             label = {
                 "30min":   "in 30 minutes",
                 "15min":   "in 15 minutes",
@@ -83,6 +82,8 @@ async def send_reminders() -> int:
                 "passive": "soon",
             }.get(slot_name, "soon")
 
+            user_tz = await get_user_timezone(settings.TELEGRAM_CHAT_ID)
+            text    = task_to_text(page, user_tz)
             try:
                 await bot.send_message(
                     chat_id=settings.TELEGRAM_CHAT_ID,
@@ -109,11 +110,14 @@ async def send_daily_summary() -> None:
         logger.error("Failed to fetch daily summary tasks: %s", exc)
         return
 
+    user_tz = await get_user_timezone(settings.TELEGRAM_CHAT_ID)
+
     if not tasks:
         message = "☀️ Good morning! No tasks scheduled for today."
     else:
         lines = ["☀️ *Good morning! Today's tasks:*"]
-        lines.extend(task_to_text(p) for p in tasks)
+        for i, p in enumerate(tasks, 1):
+            lines.append(f"{i}. {task_to_text(p, user_tz)}")
         message = "\n".join(lines)
 
     try:

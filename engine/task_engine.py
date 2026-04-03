@@ -366,15 +366,15 @@ async def _update(intent: dict, user_id: str, user_tz: str) -> str:
     update_field = (intent.get("update_field") or "").lower()
     update_value = (intent.get("update_value") or "").strip()
 
-    if not title:
-        ctx = await get_ctx(user_id)
-        if not ctx.get("last_task_title") and not ctx.get("last_task_list"):
-            return "Which task should I update?"
     if not update_field or not update_value:
         return "What should I change? e.g. _move to 6pm_ or _mark as high priority_"
 
+    # Empty/pronoun/number title all flow into _resolve_task_ref
     page, actual_title = await _resolve_task_ref(title, user_id)
     if not page:
+        ctx = await get_ctx(user_id)
+        if not ctx.get("last_task_title") and not ctx.get("last_task_list"):
+            return "Which task should I update?"
         return await _not_found_msg(title or "that task", user_id)
     page_id = page["id"]
     kwargs: dict = {}
