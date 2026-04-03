@@ -26,6 +26,7 @@ from typing import Optional
 from db.database import (
     clear_pending_task,
     get_behavior_patterns,
+    get_last_task,
     get_pending_task,
     get_user_memos,
     get_user_timezone,
@@ -33,6 +34,7 @@ from db.database import (
     log_behavior,
     record_behavior_pattern,
     reset_chat_streak,
+    set_last_task,
     set_pending_task,
 )
 from engine.router import route
@@ -64,6 +66,9 @@ CONFIDENCE_THRESHOLD = 0.55
 
 _YES_WORDS = {"yes", "y", "yep", "yeah", "sure", "ok", "okay", "confirm", "go", "do it", "save", "add it"}
 _NO_WORDS  = {"no", "n", "nope", "cancel", "stop", "abort", "nevermind", "never mind", "don't", "dont"}
+
+# Pronouns that mean "the last task I mentioned" — resolved from Redis
+_PRONOUNS = {"it", "that", "this", "that one", "this one", "that task", "this task", "the task"}
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +144,10 @@ async def handle_message(text: str, user_id: str, history: Optional[list] = None
         elif action == "list":
             result = await _list(intent, user_tz)
         elif action == "search":
+            # Record the search subject so "delete it" / "done with it" works after
+            search_title = (intent.get("title") or intent.get("keyword") or "").strip()
+            if search_title:
+                await set_last_task(user_id, search_title)
             result = await _search(intent, original_text=text, history=history, user_tz=user_tz)
         elif action == "update":
             result = await _update(intent, user_id, user_tz)
@@ -405,12 +414,17 @@ async def _update(intent: dict, user_id: str, user_tz: str) -> str:
 # ---------------------------------------------------------------------------
 async def _done(intent: dict, user_id: str, user_tz: str) -> str:
     title = (intent.get("title") or "").strip()
-    if not title:
-        return "Which task did you complete?"
+
+    # Pronoun resolution: "done with it" / "that's done" → last mentioned task
+    if not title or title.lower() in _PRONOUNS:
+        resolved = await get_last_task(user_id)
+        if not resolved:
+            return "Which task did you complete?"
+        title = resolved
 
     page = await find_task_by_title(title)
     if not page:
-        results = await search_tasks_multi(keywords=[w for w in title.split() if len(w) > 3])
+        results = await search_tasks_multi(keywords=[w for w in title.split() if len(w) > 2])
         if results:
             page = results[0]
 
@@ -422,6 +436,7 @@ async def _done(intent: dict, user_id: str, user_tz: str) -> str:
     props        = page.get("properties", {})
     recurrence   = _get_rich_text(props, PROP_RECURRENCE)
 
+    await set_last_task(user_id, actual_title)   # pronoun resolution for follow-up commands
     await mark_done(page_id)
     await log_behavior(user_id, "completed", actual_title)
 
@@ -458,12 +473,18 @@ async def _done(intent: dict, user_id: str, user_tz: str) -> str:
 # ---------------------------------------------------------------------------
 async def _delete(intent: dict, user_id: str) -> str:
     title = (intent.get("title") or "").strip()
-    if not title:
-        return "Which task should I delete?"
+
+    # Pronoun resolution: "delete it" / "remove that" → last mentioned task
+    if not title or title.lower() in _PRONOUNS:
+        resolved = await get_last_task(user_id)
+        if not resolved:
+            return "Which task should I delete? Just tell me the name."
+        title = resolved
 
     page = await find_task_by_title(title)
     if not page:
-        results = await search_tasks_multi(keywords=[w for w in title.split() if len(w) > 3])
+        # Fuzzy fallback: minimum 2-char words
+        results = await search_tasks_multi(keywords=[w for w in title.split() if len(w) > 2])
         if results:
             page = results[0]
 
@@ -471,6 +492,7 @@ async def _delete(intent: dict, user_id: str) -> str:
         return f"No task found matching *{title}*."
 
     actual_title = _get_title_from_page(page)
+    await set_last_task(user_id, actual_title)
     await delete_task(page["id"])
     await log_behavior(user_id, "deleted", actual_title)
     return f"🗑️ Deleted *{actual_title}*"

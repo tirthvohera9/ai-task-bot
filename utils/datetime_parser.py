@@ -56,7 +56,8 @@ _MONTH_MAP = {
 # Compiled patterns
 # ---------------------------------------------------------------------------
 _TIME_RE = re.compile(
-    r"\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?",
+    r"\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?"  # "at 5", "at 5pm", "at 5:30 am"
+    r"|\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b",     # bare "10am", "10 am", "10:30am" (am/pm required)
     re.IGNORECASE,
 )
 _RELATIVE_RE = re.compile(
@@ -92,14 +93,24 @@ _ORDINAL_DAY_RE = re.compile(r"\bthe\s+(\d{1,2})(?:st|nd|rd|th)\b", re.IGNORECAS
 # Helpers
 # ---------------------------------------------------------------------------
 def _apply_time(base: datetime, text: str) -> datetime:
-    """Overlay HH:MM from text onto base; default 09:00 if no time found."""
+    """Overlay HH:MM from text onto base; default 09:00 if no time found.
+
+    Handles two forms:
+      Alt 1 — "at 5", "at 5pm", "at 5:30"   → groups 1,2,3
+      Alt 2 — "10am", "10 am", "10:30am"     → groups 4,5,6  (explicit am/pm required)
+    """
     m = _TIME_RE.search(text)
     if not m:
         return base.replace(hour=9, minute=0, second=0, microsecond=0)
 
-    hour   = int(m.group(1))
-    minute = int(m.group(2)) if m.group(2) else 0
-    merid  = (m.group(3) or "").lower()
+    if m.group(1) is not None:          # Alt 1: "at HH:MM am/pm"
+        hour   = int(m.group(1))
+        minute = int(m.group(2)) if m.group(2) else 0
+        merid  = (m.group(3) or "").lower()
+    else:                               # Alt 2: bare "HHam/pm"
+        hour   = int(m.group(4))
+        minute = int(m.group(5)) if m.group(5) else 0
+        merid  = (m.group(6) or "").lower()
 
     if merid == "pm" and hour < 12:
         hour += 12

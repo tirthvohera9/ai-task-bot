@@ -198,6 +198,19 @@ async def reset_chat_streak(user_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Last-mentioned task (pronoun resolution: "delete it", "done with that")
+# ---------------------------------------------------------------------------
+async def set_last_task(user_id: str, title: str) -> None:
+    """Remember the most recently referenced task title (TTL 1h)."""
+    await _redis.set(f"last_task:{user_id}", title, ex=3600)
+
+
+async def get_last_task(user_id: str) -> Optional[str]:
+    val = await _redis.get(f"last_task:{user_id}")
+    return val if isinstance(val, str) else None
+
+
+# ---------------------------------------------------------------------------
 # User memos  (long-term behavioral signals, no TTL)
 # ---------------------------------------------------------------------------
 async def set_user_memo(user_id: str, key: str, value: str) -> None:
