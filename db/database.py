@@ -22,8 +22,8 @@ logger = logging.getLogger(__name__)
 
 # Single shared Redis client (connections are stateless HTTP REST calls)
 _redis = Redis(
-    url=settings.UPSTASH_REDIS_REST_URL,
-    token=settings.UPSTASH_REDIS_REST_TOKEN,
+    url=settings.KV_REST_API_URL,
+    token=settings.KV_REST_API_TOKEN,
 )
 
 CACHE_TTL = 60 * 60 * 24        # 24 hours

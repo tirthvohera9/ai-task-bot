@@ -19,9 +19,9 @@ class Settings(BaseSettings):
     NOTION_API_KEY: str
     NOTION_PARENT_PAGE_ID: str
 
-    # Upstash Redis — replaces SQLite on Vercel
-    UPSTASH_REDIS_REST_URL: str
-    UPSTASH_REDIS_REST_TOKEN: str
+    # Upstash Redis — auto-created by Vercel's Upstash integration
+    KV_REST_API_URL: str
+    KV_REST_API_TOKEN: str
 
     # Vercel cron job security secret
     CRON_SECRET: str
