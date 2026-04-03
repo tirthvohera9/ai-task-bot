@@ -10,6 +10,8 @@ Key schema:
   tz:{user_id}            → IANA timezone name (e.g. "Asia/Kolkata")
   pending:{user_id}       → JSON pending task awaiting confirmation (TTL 5min)
   pattern:{user_id}       → JSON behavioral pattern data
+  chat_streak:{user_id}   → int, consecutive chat-only turns (TTL 2h, reset on task)
+  memo:{user_id}          → JSON {key: value} long-term user signals (no TTL)
 """
 import hashlib
 import json
@@ -169,6 +171,47 @@ async def get_history(user_id: str) -> list[dict]:
 
 async def clear_history(user_id: str) -> None:
     await _redis.delete(f"history:{user_id}")
+
+
+# ---------------------------------------------------------------------------
+# Chat streak  (consecutive non-task turns — drift detection)
+# ---------------------------------------------------------------------------
+CHAT_STREAK_TTL = 60 * 60 * 2  # 2h — resets with inactivity
+
+
+async def increment_chat_streak(user_id: str) -> int:
+    """Increment and return the current chat streak count."""
+    key = f"chat_streak:{user_id}"
+    count = await _redis.incr(key)
+    if count == 1:
+        await _redis.expire(key, CHAT_STREAK_TTL)
+    return int(count)
+
+
+async def get_chat_streak(user_id: str) -> int:
+    val = await _redis.get(f"chat_streak:{user_id}")
+    return int(val) if val else 0
+
+
+async def reset_chat_streak(user_id: str) -> None:
+    await _redis.delete(f"chat_streak:{user_id}")
+
+
+# ---------------------------------------------------------------------------
+# User memos  (long-term behavioral signals, no TTL)
+# ---------------------------------------------------------------------------
+async def set_user_memo(user_id: str, key: str, value: str) -> None:
+    """Store a long-term signal about the user (e.g. 'prefers_evening': 'true')."""
+    memo_key = f"memo:{user_id}"
+    raw = await _redis.get(memo_key)
+    memos: dict = json.loads(raw) if raw else {}
+    memos[key] = value
+    await _redis.set(memo_key, json.dumps(memos))
+
+
+async def get_user_memos(user_id: str) -> dict:
+    raw = await _redis.get(f"memo:{user_id}")
+    return json.loads(raw) if raw else {}
 
 
 # ---------------------------------------------------------------------------

@@ -406,22 +406,27 @@ def task_to_text(page: dict, user_tz: str = "UTC") -> str:
     notes      = _get_rich_text(props, PROP_NOTES)
     recurrence = _get_rich_text(props, PROP_RECURRENCE)
 
-    status_icon = "✅" if status == "done" else "•"
-    cat_icon    = _CATEGORY_ICONS.get(category, "") if category else ""
-    prefix      = f"{status_icon} {cat_icon}".strip()
-    line        = f"{prefix} *{title}*"
+    done     = status == "done"
+    cat_icon = _CATEGORY_ICONS.get(category, "") if category else ""
+
+    # Title — strike-through style for done tasks
+    line = f"~{title}~" if done else f"*{title}*"
+    if cat_icon:
+        line += f" {cat_icon}"
 
     if due:
         line += f" — {format_local(due, user_tz)}"
 
-    if priority and priority != "medium":
-        line += f" [{'🔴' if priority == 'high' else '🟢'} {priority}]"
+    if priority == "high":
+        line += " 🔴"
+    elif priority == "low":
+        line += " 🟢"
 
     if recurrence and recurrence != "none":
-        line += f" ♻️ _{recurrence}_"
+        line += " ♻️"
 
     if notes:
-        line += f"\n  ↳ _{notes}_"
+        line += f"\n   ↳ _{notes}_"
 
     return line
 

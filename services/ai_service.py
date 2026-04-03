@@ -119,17 +119,16 @@ Return ONLY the JSON. No other text whatsoever."""
 # Response synthesis prompt
 # ---------------------------------------------------------------------------
 _SYNTH_SYSTEM = """\
-You are a helpful personal assistant with access to the user's task list.
-Answer the user's question naturally using the task data provided.
+You are a concise personal assistant answering questions about the user's tasks.
 
 Rules:
-- Answer directly — don't say "I found X tasks" or "According to Notion"
-- If tasks exist: mention them naturally, include times/dates
-- If no tasks: say so naturally and offer to help create one
-- Be concise — avoid bullet dumps for 1-2 tasks; use bullets for 3+
-- Include a relevant emoji when natural
-- For time queries ("when do I…?"): give the exact time
-- For "am I free?" queries: say yes/no clearly"""
+- Get to the point immediately — no preamble
+- 1–2 tasks: answer in one sentence with time/date
+- 3+ tasks: short numbered list
+- No tasks found: say so in one sentence, offer to add one
+- Never say "I found", "According to", "Based on the data"
+- Time queries ("when do I…?"): give exact time and day only
+- Yes/no queries ("am I free?"): lead with yes or no"""
 
 
 async def parse_intent(
@@ -192,30 +191,60 @@ async def synthesize_response(
         return ("📋 " + "\n".join(task_texts)) if task_texts else "No matching tasks found."
 
 
-async def general_chat(text: str, history: Optional[list] = None) -> str:
-    """Conversational fallback for non-task messages."""
-    _CHAT_SYSTEM = (
-        "You are a helpful AI personal assistant and task manager. "
-        "Answer concisely and naturally. "
-        "Help users manage tasks, reminders, and schedules. "
-        "If they want to add a task, suggest: 'Try: add dentist tomorrow at 3pm'"
-    )
-    messages: list = [{"role": "system", "content": _CHAT_SYSTEM}]
+async def general_chat(
+    text: str,
+    history: Optional[list] = None,
+    task_context: Optional[str] = None,
+    user_profile: Optional[str] = None,
+    chat_streak: int = 0,
+) -> str:
+    """
+    Task-aware conversational reply.
+
+    Behaviour changes by streak:
+      0–2 turns : helpful, task-aware, suggest actions when relevant
+      3+  turns : brief drift-back — acknowledge then pivot to action
+    """
+    task_block    = f"\nUser's tasks right now: {task_context}" if task_context else ""
+    profile_block = f"\nUser profile: {user_profile}" if user_profile else ""
+
+    if chat_streak >= 3:
+        system = (
+            "You are a concise task-focused assistant. "
+            "The user has been chatting for a while without taking action. "
+            "Respond in 1–2 sentences, then redirect them toward doing something concrete. "
+            "Be direct, not preachy."
+            f"{task_block}{profile_block}"
+        )
+        max_tokens = 120
+    else:
+        system = (
+            "You are a personal assistant who knows the user's schedule. "
+            "Be brief and direct — max 3 sentences. "
+            "If the user mentions something they need to do, offer to add it as a task. "
+            "If they seem overwhelmed, reference their task count and offer to help prioritize. "
+            "If they ask a question you can answer quickly, just answer it. "
+            "Never use filler phrases like 'Great question!' or 'Of course!'."
+            f"{task_block}{profile_block}"
+        )
+        max_tokens = 250
+
+    messages: list = [{"role": "system", "content": system}]
     if history:
-        messages.extend(history[-6:])
+        messages.extend(history[-4:])
     messages.append({"role": "user", "content": text})
 
     try:
         response = await _client.chat.completions.create(
             model=settings.OPENROUTER_MODEL,
-            max_tokens=400,
-            temperature=0.7,
+            max_tokens=max_tokens,
+            temperature=0.6,
             messages=messages,
         )
         return response.choices[0].message.content.strip()
     except Exception as exc:
         logger.error("general_chat failed: %s", exc)
-        return "Sorry, I couldn't process that right now. Please try again."
+        return "Got it. What do you want to do about it?"
 
 
 # ---------------------------------------------------------------------------
