@@ -88,10 +88,37 @@ _DAY_MONTH_RE = re.compile(
 )
 _ORDINAL_DAY_RE = re.compile(r"\bthe\s+(\d{1,2})(?:st|nd|rd|th)\b", re.IGNORECASE)
 
+# Bare integer after a day word: "tomorrow 10", "friday 9" — no am/pm marker
+_BARE_HOUR_AFTER_DAY_RE = re.compile(
+    r"\b(?:today|tomorrow|tonight|monday|tuesday|wednesday|thursday|friday"
+    r"|saturday|sunday|mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)\s+"
+    r"(\d{1,2})\b(?!\s*(?:am|pm|:\d))",
+    re.IGNORECASE,
+)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+def _bare_hour(text: str) -> Optional[int]:
+    """
+    Extract a bare integer hour after a day word when no am/pm is present.
+    e.g. "tomorrow 10" → 10, "friday 2" → 14 (PM heuristic), "tuesday 9" → 9
+    Returns the 0-23 hour integer, or None if no match.
+    """
+    m = _BARE_HOUR_AFTER_DAY_RE.search(text)
+    if not m:
+        return None
+    h = int(m.group(1))
+    if h > 12:
+        return h  # already 24h
+    if 1 <= h <= 6:
+        return h + 12   # 1-6 → PM (same heuristic as "at 5")
+    if h == 0:
+        return 0
+    return h  # 7-12: treat as-is (7-11 AM, 12 PM)
+
+
 def _apply_time(base: datetime, text: str) -> datetime:
     """Overlay HH:MM from text onto base; default 09:00 if no time found.
 
@@ -101,6 +128,10 @@ def _apply_time(base: datetime, text: str) -> datetime:
     """
     m = _TIME_RE.search(text)
     if not m:
+        # Try bare integer after day word: "tomorrow 10" → 10:00
+        bare = _bare_hour(text)
+        if bare is not None:
+            return base.replace(hour=bare, minute=0, second=0, microsecond=0)
         return base.replace(hour=9, minute=0, second=0, microsecond=0)
 
     if m.group(1) is not None:          # Alt 1: "at HH:MM am/pm"

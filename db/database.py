@@ -12,6 +12,7 @@ Key schema:
   pattern:{user_id}       → JSON behavioral pattern data
   chat_streak:{user_id}   → int, consecutive chat-only turns (TTL 2h, reset on task)
   memo:{user_id}          → JSON {key: value} long-term user signals (no TTL)
+  ctx:{user_id}           → JSON {last_task_title, last_task_list, last_action} (TTL 2h)
 """
 import hashlib
 import json
@@ -198,16 +199,36 @@ async def reset_chat_streak(user_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Last-mentioned task (pronoun resolution: "delete it", "done with that")
+# Interaction context  (pronoun resolution + number-based control)
+# key: ctx:{user_id}  TTL 2h
+# Fields stored: last_task_title, last_task_list, last_action
 # ---------------------------------------------------------------------------
+CTX_TTL = 60 * 60 * 2
+
+
+async def set_ctx(user_id: str, **kwargs) -> None:
+    """Merge fields into the user's interaction context (patch, not replace)."""
+    key = f"ctx:{user_id}"
+    raw = await _redis.get(key)
+    ctx = json.loads(raw) if raw else {}
+    ctx.update(kwargs)
+    await _redis.set(key, json.dumps(ctx), ex=CTX_TTL)
+
+
+async def get_ctx(user_id: str) -> dict:
+    """Return the full interaction context dict."""
+    raw = await _redis.get(f"ctx:{user_id}")
+    return json.loads(raw) if raw else {}
+
+
+# Backward-compat wrappers (used by existing code)
 async def set_last_task(user_id: str, title: str) -> None:
-    """Remember the most recently referenced task title (TTL 1h)."""
-    await _redis.set(f"last_task:{user_id}", title, ex=3600)
+    await set_ctx(user_id, last_task_title=title)
 
 
 async def get_last_task(user_id: str) -> Optional[str]:
-    val = await _redis.get(f"last_task:{user_id}")
-    return val if isinstance(val, str) else None
+    ctx = await get_ctx(user_id)
+    return ctx.get("last_task_title")
 
 
 # ---------------------------------------------------------------------------

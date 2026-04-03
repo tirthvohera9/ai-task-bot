@@ -186,15 +186,12 @@ async def _voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("❌ Could not transcribe voice message. Please try text.")
         return
 
-    # Echo back what was heard
-    await update.message.reply_text(
-        f'🎤 _Heard: "{transcribed}"_', parse_mode=ParseMode.MARKDOWN
-    )
-
-    # Low confidence: ask for clarification instead of acting on a guess
+    # Low confidence: show what we heard and ask for clarification
     if confidence < VOICE_CONFIDENCE_THRESHOLD:
+        await update.message.reply_text(
+            f'🎤 _Heard: "{transcribed}"_', parse_mode=ParseMode.MARKDOWN
+        )
         history = await get_history(user_id)
-        # Try to parse and show what we think they meant
         from services.ai_service import parse_intent
         from datetime import timezone
         now    = __import__("datetime").datetime.now(timezone.utc).isoformat()
@@ -202,9 +199,8 @@ async def _voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         if intent and intent.get("action") == "add" and intent.get("title"):
             await update.message.reply_text(
-                f"⚠️ I'm not fully sure I caught that correctly.\n\n"
-                f"Did you mean: *{intent['title']}*?\n\n"
-                f"Reply *yes* to confirm or send a text message with the correct command.",
+                f"⚠️ Low confidence. Did you mean: *{intent['title']}*?\n\n"
+                f"Reply *yes* to confirm or type the correct task.",
                 parse_mode=ParseMode.MARKDOWN,
             )
             from db.database import set_pending_task
@@ -217,11 +213,12 @@ async def _voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             })
         else:
             await update.message.reply_text(
-                "⚠️ I didn't catch that clearly. Could you please repeat or type your message?",
+                "⚠️ Didn't catch that clearly. Could you repeat or type it?",
                 parse_mode=ParseMode.MARKDOWN,
             )
         return
 
+    # High confidence — process silently (no transcript echo)
     history = await get_history(user_id)
 
     try:

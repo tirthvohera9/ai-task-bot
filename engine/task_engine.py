@@ -26,6 +26,7 @@ from typing import Optional
 from db.database import (
     clear_pending_task,
     get_behavior_patterns,
+    get_ctx,
     get_last_task,
     get_pending_task,
     get_user_memos,
@@ -34,6 +35,7 @@ from db.database import (
     log_behavior,
     record_behavior_pattern,
     reset_chat_streak,
+    set_ctx,
     set_last_task,
     set_pending_task,
 )
@@ -43,6 +45,7 @@ from services.notion_service import (
     create_task,
     delete_task,
     find_task_by_title,
+    get_task_by_id,
     list_tasks,
     list_tasks_by_date_range,
     mark_done,
@@ -142,7 +145,7 @@ async def handle_message(text: str, user_id: str, history: Optional[list] = None
         if action == "add":
             result = await _add(intent, user_id, user_tz, history)
         elif action == "list":
-            result = await _list(intent, user_tz)
+            result = await _list(intent, user_tz, user_id=user_id)
         elif action == "search":
             # Record the search subject so "delete it" / "done with it" works after
             search_title = (intent.get("title") or intent.get("keyword") or "").strip()
@@ -272,7 +275,7 @@ async def _execute_confirmed_task(pending: dict, user_id: str, user_tz: str) -> 
 # ---------------------------------------------------------------------------
 # LIST — numbered, concise
 # ---------------------------------------------------------------------------
-async def _list(intent: dict, user_tz: str) -> str:
+async def _list(intent: dict, user_tz: str, user_id: Optional[str] = None) -> str:
     from datetime import timedelta
     date_range   = (intent.get("date_range") or "today").lower()
     include_done = intent.get("include_done", False)
@@ -311,6 +314,12 @@ async def _list(intent: dict, user_tz: str) -> str:
             "Tomorrow": "Nothing scheduled for tomorrow yet.",
         }
         return empty.get(label, f"No tasks found for *{label}*.")
+
+    # Save to context so "delete 1" / "done 2" resolves correctly
+    if user_id:
+        await set_ctx(user_id, last_task_list=[
+            {"id": p["id"], "title": _get_title_from_page(p)} for p in tasks
+        ], last_action="list")
 
     lines = [f"📋 *{label}:*"]
     for i, p in enumerate(tasks, 1):
@@ -358,21 +367,16 @@ async def _update(intent: dict, user_id: str, user_tz: str) -> str:
     update_value = (intent.get("update_value") or "").strip()
 
     if not title:
-        return "Which task should I update? Include the task name."
+        ctx = await get_ctx(user_id)
+        if not ctx.get("last_task_title") and not ctx.get("last_task_list"):
+            return "Which task should I update?"
     if not update_field or not update_value:
         return "What should I change? e.g. _move to 6pm_ or _mark as high priority_"
 
-    page = await find_task_by_title(title)
+    page, actual_title = await _resolve_task_ref(title, user_id)
     if not page:
-        results = await search_tasks_multi(keywords=[w for w in title.split() if len(w) > 3])
-        if results:
-            page = results[0]
-
-    if not page:
-        return f"No active task found matching *{title}*."
-
-    page_id      = page["id"]
-    actual_title = _get_title_from_page(page)
+        return await _not_found_msg(title or "that task", user_id)
+    page_id = page["id"]
     kwargs: dict = {}
 
     if update_field == "datetime":
@@ -413,30 +417,17 @@ async def _update(intent: dict, user_id: str, user_tz: str) -> str:
 # DONE — mark complete + spawn next if recurring
 # ---------------------------------------------------------------------------
 async def _done(intent: dict, user_id: str, user_tz: str) -> str:
-    title = (intent.get("title") or "").strip()
-
-    # Pronoun resolution: "done with it" / "that's done" → last mentioned task
-    if not title or title.lower() in _PRONOUNS:
-        resolved = await get_last_task(user_id)
-        if not resolved:
-            return "Which task did you complete?"
-        title = resolved
-
-    page = await find_task_by_title(title)
-    if not page:
-        results = await search_tasks_multi(keywords=[w for w in title.split() if len(w) > 2])
-        if results:
-            page = results[0]
+    title  = (intent.get("title") or "").strip()
+    page, actual_title = await _resolve_task_ref(title, user_id)
 
     if not page:
-        return f"No active task found matching *{title}*."
+        return await _not_found_msg(title or "that task", user_id)
 
-    page_id      = page["id"]
-    actual_title = _get_title_from_page(page)
-    props        = page.get("properties", {})
-    recurrence   = _get_rich_text(props, PROP_RECURRENCE)
+    page_id    = page["id"]
+    props      = page.get("properties", {})
+    recurrence = _get_rich_text(props, PROP_RECURRENCE)
 
-    await set_last_task(user_id, actual_title)   # pronoun resolution for follow-up commands
+    await set_ctx(user_id, last_task_title=actual_title)
     await mark_done(page_id)
     await log_behavior(user_id, "completed", actual_title)
 
@@ -465,37 +456,92 @@ async def _done(intent: dict, user_id: str, user_tz: str) -> str:
         except Exception as exc:
             logger.warning("Recurrence expansion failed: %s", exc)
 
-    return f"✅ *{actual_title}* — done! 🎉{follow_up}"
+    return f"✅ Marked done: *{actual_title}*{follow_up}"
 
 
 # ---------------------------------------------------------------------------
 # DELETE
 # ---------------------------------------------------------------------------
 async def _delete(intent: dict, user_id: str) -> str:
-    title = (intent.get("title") or "").strip()
-
-    # Pronoun resolution: "delete it" / "remove that" → last mentioned task
-    if not title or title.lower() in _PRONOUNS:
-        resolved = await get_last_task(user_id)
-        if not resolved:
-            return "Which task should I delete? Just tell me the name."
-        title = resolved
-
-    page = await find_task_by_title(title)
-    if not page:
-        # Fuzzy fallback: minimum 2-char words
-        results = await search_tasks_multi(keywords=[w for w in title.split() if len(w) > 2])
-        if results:
-            page = results[0]
+    title  = (intent.get("title") or "").strip()
+    page, actual_title = await _resolve_task_ref(title, user_id)
 
     if not page:
-        return f"No task found matching *{title}*."
+        return await _not_found_msg(title or "that task", user_id)
 
-    actual_title = _get_title_from_page(page)
-    await set_last_task(user_id, actual_title)
+    await set_ctx(user_id, last_task_title=actual_title)
     await delete_task(page["id"])
     await log_behavior(user_id, "deleted", actual_title)
     return f"🗑️ Deleted *{actual_title}*"
+
+
+# ---------------------------------------------------------------------------
+# Task reference resolution (number → list position, pronoun → last task, fuzzy)
+# ---------------------------------------------------------------------------
+async def _resolve_task_ref(ref: str, user_id: str):
+    """
+    Resolve any task reference to a (page, actual_title) tuple.
+    Returns (None, None) when nothing matches.
+
+    Priority order:
+      1. Digit → ctx["last_task_list"][n-1]  (number-based control)
+      2. Pronoun → ctx["last_task_title"]
+      3. Exact title → find_task_by_title()
+      4. Fuzzy keyword → search_tasks_multi()
+    """
+    ref = (ref or "").strip()
+    ctx = await get_ctx(user_id)
+
+    # 1. Number reference: "delete 1", "done 2", "move 3 to tomorrow"
+    if ref.isdigit():
+        n = int(ref)
+        task_list = ctx.get("last_task_list", [])
+        if task_list and 1 <= n <= len(task_list):
+            entry = task_list[n - 1]
+            page = await get_task_by_id(entry["id"])
+            if not page or page.get("archived"):
+                page = await find_task_by_title(entry["title"])
+            if page:
+                return page, entry["title"]
+        return None, None
+
+    # 2. Pronoun: "delete it", "done with that", "move this to tomorrow"
+    if not ref or ref.lower() in _PRONOUNS:
+        ref = ctx.get("last_task_title", "")
+        if not ref:
+            return None, None
+
+    # 3. Exact title match
+    page = await find_task_by_title(ref)
+    if page:
+        return page, _get_title_from_page(page)
+
+    # 4. Fuzzy / keyword fallback (min 2-char words)
+    words = [w for w in ref.split() if len(w) > 2]
+    if words:
+        results = await search_tasks_multi(keywords=words)
+        if results:
+            page = results[0]
+            return page, _get_title_from_page(page)
+
+    return None, None
+
+
+async def _not_found_msg(ref: str, user_id: str) -> str:
+    """Return a helpful suggestion instead of a dead-end 'not found' message."""
+    ctx = await get_ctx(user_id)
+    task_list = ctx.get("last_task_list", [])
+    if task_list:
+        numbered = "\n".join(
+            f"{i + 1}. {t['title']}" for i, t in enumerate(task_list[:4])
+        )
+        return f"Couldn't find *{ref}*. Last tasks shown:\n{numbered}\n\nReply with the number to act on one."
+    # No list context — try a broad search
+    results = await list_tasks(include_done=False)
+    if results:
+        titles = ", ".join(_get_title_from_page(p) for p in results[:3])
+        return f"Couldn't find *{ref}*. Active tasks: {titles}"
+    return f"Couldn't find *{ref}*. You have no active tasks right now."
 
 
 # ---------------------------------------------------------------------------

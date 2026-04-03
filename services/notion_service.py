@@ -217,6 +217,15 @@ async def delete_task(page_id: str) -> None:
     await _notion.pages.update(page_id=page_id, archived=True)
 
 
+async def get_task_by_id(page_id: str) -> Optional[dict]:
+    """Fetch a single Notion page by ID. Returns None on any error."""
+    try:
+        return await _notion.pages.retrieve(page_id=page_id)
+    except Exception as exc:
+        logger.warning("get_task_by_id(%s) failed: %s", page_id, exc)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Smart queries
 # ---------------------------------------------------------------------------
