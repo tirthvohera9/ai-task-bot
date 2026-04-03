@@ -1,24 +1,21 @@
 """
-Entry point: FastAPI app with Telegram webhook + APScheduler.
+FastAPI entry point — Vercel serverless edition.
 
-Startup sequence:
-  1. Init SQLite
-  2. Build python-telegram-bot Application
-  3. Register handlers
-  4. Start APScheduler (reminders + daily summary)
-  5. Register /webhook route with Telegram
+Each request is stateless:
+  - /webhook      → creates a fresh bot Application, processes the update, tears down
+  - /cron/reminders → checks Notion for due tasks, sends Telegram reminders
+  - /cron/summary   → sends the 08:00 UTC daily summary
+  - /setup          → registers the Telegram webhook (run once after deploy)
+  - /health         → liveness check
 """
 import logging
-from contextlib import asynccontextmanager
 
-import uvicorn
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Header, Request, Response
 from telegram import Update
 from telegram.ext import Application
 
 from config import settings
-from db.database import init_db
-from engine.scheduler import start_scheduler
+from engine.scheduler import send_daily_summary, send_reminders
 from routes.telegram import setup_handlers
 
 logging.basicConfig(
@@ -27,65 +24,88 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-_bot_app: Application = None  # global so the webhook route can access it
+app = FastAPI(title="AI Task Manager")
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global _bot_app
-
-    # 1. Database
-    await init_db()
-
-    # 2. Telegram bot
-    _bot_app = Application.builder().token(settings.TELEGRAM_BOT_TOKEN).build()
-    setup_handlers(_bot_app)
-    await _bot_app.initialize()
-    await _bot_app.start()
-
-    # 3. Scheduler
-    scheduler = start_scheduler(_bot_app.bot)
-    scheduler.start()
-
-    # 4. Register webhook with Telegram (only if WEBHOOK_URL is configured)
-    if settings.WEBHOOK_URL:
-        webhook_url = f"{settings.WEBHOOK_URL.rstrip('/')}/webhook"
-        await _bot_app.bot.set_webhook(url=webhook_url)
-        logger.info("Webhook registered: %s", webhook_url)
-    else:
-        logger.warning("WEBHOOK_URL not set — Telegram webhook not registered.")
-
-    logger.info("Application started.")
-    yield
-
-    # Shutdown
-    scheduler.shutdown(wait=False)
-    await _bot_app.stop()
-    await _bot_app.shutdown()
-    logger.info("Application stopped.")
-
-
-app = FastAPI(title="AI Task Manager", lifespan=lifespan)
-
-
+# ---------------------------------------------------------------------------
+# Telegram webhook
+# ---------------------------------------------------------------------------
 @app.post("/webhook")
 async def webhook(request: Request) -> Response:
-    """Receive Telegram updates."""
+    """Receive and process a Telegram update."""
     data = await request.json()
-    update = Update.de_json(data, _bot_app.bot)
-    await _bot_app.process_update(update)
+
+    bot_app = Application.builder().token(settings.TELEGRAM_BOT_TOKEN).build()
+    setup_handlers(bot_app)
+    await bot_app.initialize()
+
+    try:
+        update = Update.de_json(data, bot_app.bot)
+        await bot_app.process_update(update)
+    finally:
+        await bot_app.shutdown()
+
     return Response(status_code=200)
 
 
+# ---------------------------------------------------------------------------
+# Cron endpoints  (called by Vercel on schedule — secured by CRON_SECRET)
+# ---------------------------------------------------------------------------
+def _verify_cron(authorization: str | None) -> bool:
+    return authorization == f"Bearer {settings.CRON_SECRET}"
+
+
+@app.get("/cron/reminders")
+async def cron_reminders(authorization: str | None = Header(default=None)) -> dict:
+    """Every-minute cron: send reminders for tasks due soon."""
+    if not _verify_cron(authorization):
+        return Response(status_code=401)  # type: ignore[return-value]
+
+    sent = await send_reminders()
+    return {"ok": True, "reminders_sent": sent}
+
+
+@app.get("/cron/summary")
+async def cron_summary(authorization: str | None = Header(default=None)) -> dict:
+    """Daily 08:00 UTC cron: send today's task summary."""
+    if not _verify_cron(authorization):
+        return Response(status_code=401)  # type: ignore[return-value]
+
+    await send_daily_summary()
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Setup — call once after deploying to register the Telegram webhook
+# ---------------------------------------------------------------------------
+@app.get("/setup")
+async def setup(authorization: str | None = Header(default=None)) -> dict:
+    """Register the Telegram webhook URL. Secure with CRON_SECRET header."""
+    if not _verify_cron(authorization):
+        return Response(status_code=401)  # type: ignore[return-value]
+
+    bot_app = Application.builder().token(settings.TELEGRAM_BOT_TOKEN).build()
+    await bot_app.initialize()
+
+    # Derive webhook URL from Vercel's VERCEL_URL env var if available,
+    # otherwise build it from the request host.
+    import os
+    vercel_url = os.environ.get("VERCEL_URL", "")
+    webhook_url = f"https://{vercel_url}/webhook" if vercel_url else ""
+
+    if not webhook_url:
+        await bot_app.shutdown()
+        return {"ok": False, "error": "VERCEL_URL not set"}
+
+    await bot_app.bot.set_webhook(url=webhook_url)
+    await bot_app.shutdown()
+    logger.info("Webhook registered: %s", webhook_url)
+    return {"ok": True, "webhook_url": webhook_url}
+
+
+# ---------------------------------------------------------------------------
+# Health
+# ---------------------------------------------------------------------------
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
-
-
-if __name__ == "__main__":
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=settings.PORT,
-        reload=False,
-    )
