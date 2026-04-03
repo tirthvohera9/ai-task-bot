@@ -12,12 +12,22 @@ from datetime import datetime, timedelta, timezone
 from telegram import Bot
 
 from config import settings
-from db.database import get_user_timezone, is_reminder_sent, mark_reminder_sent
+from db.database import (
+    get_user_timezone,
+    is_overdue_sent,
+    is_reminder_sent,
+    mark_overdue_sent,
+    mark_reminder_sent,
+    set_ctx,
+)
 from services.notion_service import (
     get_due_soon,
+    get_overdue_tasks,
     list_tasks,
     task_to_text,
     _get_select,
+    _get_title,
+    PROP_DUE,
 )
 
 logger = logging.getLogger(__name__)
@@ -128,3 +138,68 @@ async def send_daily_summary() -> None:
         )
     except Exception as exc:
         logger.error("Daily summary send failed: %s", exc)
+
+
+async def send_overdue_nudges() -> int:
+    """
+    Find todo tasks past their due time and send a single nudge per task per day.
+    Sets ctx so the user can reply 'reschedule to tomorrow' or 'drop it'
+    without re-specifying the task name.
+    Returns number of nudges sent.
+    """
+    bot  = Bot(token=settings.TELEGRAM_BOT_TOKEN)
+    sent = 0
+
+    try:
+        overdue = await get_overdue_tasks()
+    except Exception as exc:
+        logger.error("Failed to fetch overdue tasks: %s", exc)
+        return 0
+
+    if not overdue:
+        return 0
+
+    user_tz = await get_user_timezone(settings.TELEGRAM_CHAT_ID)
+
+    for page in overdue:
+        page_id = page["id"]
+
+        if await is_overdue_sent(page_id):
+            continue
+
+        props = page.get("properties", {})
+        title = _get_title(props)
+        due_str = (props.get(PROP_DUE, {}).get("date") or {}).get("start", "")
+
+        # Format the missed time in user's timezone
+        try:
+            from utils.datetime_parser import format_local
+            was_due = format_local(due_str, user_tz) if due_str else "earlier today"
+        except Exception:
+            was_due = "earlier"
+
+        # Set ctx so pronoun resolution works immediately after this nudge
+        await set_ctx(
+            settings.TELEGRAM_CHAT_ID,
+            last_task_title=title,
+            last_action="overdue_nudge",
+        )
+
+        try:
+            await bot.send_message(
+                chat_id=settings.TELEGRAM_CHAT_ID,
+                text=(
+                    f"⚠️ *Overdue:* {title}\n"
+                    f"Was due: {was_due}\n\n"
+                    f"Reschedule or drop it?\n"
+                    f"_Reply: 'tomorrow 10am' · 'next monday' · 'drop it'_"
+                ),
+                parse_mode="Markdown",
+            )
+            await mark_overdue_sent(page_id)
+            sent += 1
+            logger.info("Overdue nudge sent for '%s' (%s)", title, page_id)
+        except Exception as exc:
+            logger.error("Overdue nudge failed for %s: %s", page_id, exc)
+
+    return sent

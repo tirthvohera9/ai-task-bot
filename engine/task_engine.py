@@ -73,6 +73,9 @@ _NO_WORDS  = {"no", "n", "nope", "cancel", "stop", "abort", "nevermind", "never 
 # Pronouns that mean "the last task I mentioned" — resolved from Redis
 _PRONOUNS = {"it", "that", "this", "that one", "this one", "that task", "this task", "the task"}
 
+# Phrases that mean "delete the last-mentioned task" (common replies to overdue nudges)
+_DROP_PHRASES = {"drop it", "drop that", "remove it", "forget it", "skip it", "delete it", "remove that"}
+
 
 # ---------------------------------------------------------------------------
 # Entry point
@@ -133,7 +136,13 @@ async def handle_message(text: str, user_id: str, history: Optional[list] = None
                 return "Cancelled. What else?"
             await clear_pending_task(user_id)
 
-    # ── 2. Route and dispatch ────────────────────────────────────────────────
+    # ── 2. Quick intercept for drop/reschedule replies to overdue nudges ────
+    lowered_full = text.strip().lower()
+    if lowered_full in _DROP_PHRASES:
+        # Treat as "delete last task" — _delete handles pronoun resolution
+        return await _delete({"title": ""}, user_id)
+
+    # ── 3. Route and dispatch ────────────────────────────────────────────────
     try:
         intent = await route(text, history=history)
 

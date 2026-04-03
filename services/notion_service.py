@@ -353,6 +353,21 @@ async def get_due_soon(within_minutes: int = 15) -> list[dict]:
     return resp.get("results", [])
 
 
+async def get_overdue_tasks() -> list[dict]:
+    """Todo tasks whose due datetime has already passed."""
+    now   = datetime.now(timezone.utc)
+    db_id = await get_or_create_database()
+    resp  = await _notion.databases.query(
+        database_id=db_id,
+        filter={"and": [
+            {"property": PROP_STATUS, "select": {"equals": "todo"}},
+            {"property": PROP_DUE,    "date":   {"before": now.isoformat()}},
+        ]},
+        sorts=[{"property": PROP_DUE, "direction": "ascending"}],
+    )
+    return resp.get("results", [])
+
+
 async def list_recurring_tasks() -> list[dict]:
     """All todo tasks that have a recurrence rule set."""
     db_id = await get_or_create_database()

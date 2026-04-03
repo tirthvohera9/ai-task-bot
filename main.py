@@ -15,7 +15,7 @@ from telegram import Update
 from telegram.ext import Application
 
 from config import settings
-from engine.scheduler import send_daily_summary, send_reminders
+from engine.scheduler import send_daily_summary, send_overdue_nudges, send_reminders
 from routes.telegram import setup_handlers
 
 logging.basicConfig(
@@ -67,12 +67,22 @@ async def cron_reminders(authorization: str | None = Header(default=None)) -> di
 
 @app.get("/cron/summary")
 async def cron_summary(authorization: str | None = Header(default=None)) -> dict:
-    """Daily 08:00 UTC cron: send today's task summary."""
+    """Daily 08:00 IST cron: send today's task summary."""
     if not _verify_cron(authorization):
         return Response(status_code=401)  # type: ignore[return-value]
 
     await send_daily_summary()
     return {"ok": True}
+
+
+@app.get("/cron/overdue")
+async def cron_overdue(authorization: str | None = Header(default=None)) -> dict:
+    """Every 30min: nudge user about tasks past their due time."""
+    if not _verify_cron(authorization):
+        return Response(status_code=401)  # type: ignore[return-value]
+
+    nudged = await send_overdue_nudges()
+    return {"ok": True, "nudges_sent": nudged}
 
 
 # ---------------------------------------------------------------------------

@@ -155,6 +155,21 @@ async def mark_reminder_sent(
 
 
 # ---------------------------------------------------------------------------
+# Overdue nudge dedup  (once per task per day)
+# ---------------------------------------------------------------------------
+OVERDUE_TTL = 60 * 60 * 23   # 23h — nudge once per day per task
+
+
+async def is_overdue_sent(page_id: str) -> bool:
+    result = await _redis.exists(f"overdue:{page_id}")
+    return result > 0
+
+
+async def mark_overdue_sent(page_id: str) -> None:
+    await _redis.set(f"overdue:{page_id}", "1", ex=OVERDUE_TTL)
+
+
+# ---------------------------------------------------------------------------
 # Conversation history  (short-term context per user)
 # ---------------------------------------------------------------------------
 async def add_to_history(user_id: str, role: str, content: str) -> None:
