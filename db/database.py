@@ -60,7 +60,7 @@ async def set_user_timezone(user_id: str, tz_name: str) -> None:
 
 async def get_user_timezone(user_id: str) -> str:
     tz = await _redis.get(f"tz:{user_id}")
-    return tz or "UTC"
+    return tz or "Asia/Kolkata"
 
 
 # ---------------------------------------------------------------------------
