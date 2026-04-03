@@ -29,36 +29,55 @@ _client = AsyncOpenAI(
 )
 
 _SYSTEM_PROMPT = """\
-You are a task-extraction engine.
+You are a task-extraction engine with long-term memory via Notion.
 Given a user message, return ONLY a single valid JSON object — no explanation, no markdown.
 
 Schema:
-{"action":"add|list|delete|done|update","title":"string","datetime":"ISO8601 UTC or null","priority":"low|medium|high","entity":"string or null","confidence":0.0}
+{
+  "action": "add|list|delete|done|search",
+  "title": "task title (for add/delete/done) or null",
+  "keyword": "keyword to search tasks by (for search/list queries) or null",
+  "datetime": "ISO8601 UTC string or null",
+  "date_range": "today|tomorrow|this_week|last_7_days|last_15_days|last_30_days|all or null",
+  "priority": "low|medium|high",
+  "include_done": false,
+  "confidence": 0.0
+}
 
 Rules:
-- action must be exactly one of: add, list, delete, done, update
-- datetime must be a full ISO-8601 UTC string (e.g. 2025-06-01T17:00:00+00:00) or null
-- confidence: 0.0–1.0, how certain you are
-- Return ONLY the JSON object. No other text."""
+- action=search: user asks about specific tasks ("when do I buy milk?", "what did I plan for Friday?")
+- action=list: user wants all tasks in a time window ("reminders for tomorrow", "last 15 days")
+- keyword: extract the subject ("milk" from "when do I have to buy milk")
+- date_range: extract from "last 15 days", "tomorrow", "this week", "last month" etc.
+- include_done=true when user asks about past/historical tasks
+- Return ONLY the JSON. No other text."""
 
 
-async def parse_intent(text: str, current_time: Optional[str] = None) -> Optional[dict]:
+async def parse_intent(
+    text: str,
+    current_time: Optional[str] = None,
+    history: Optional[list] = None,
+) -> Optional[dict]:
     """
     Send text to OpenRouter and return a parsed intent dict.
+    history: recent conversation turns for context (e.g. resolving "5pm" follow-ups).
     Returns None on any failure.
     """
     now = current_time or datetime.now(timezone.utc).isoformat()
     user_message = f"Current UTC time: {now}\nUser input: {text}"
 
+    # Build messages: system + recent history (last 4 msgs) + current input
+    messages: list = [{"role": "system", "content": _SYSTEM_PROMPT}]
+    if history:
+        messages.extend(history[-4:])
+    messages.append({"role": "user", "content": user_message})
+
     try:
         response = await _client.chat.completions.create(
             model=settings.OPENROUTER_MODEL,
             max_tokens=200,
-            temperature=0,          # deterministic output
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user",   "content": user_message},
-            ],
+            temperature=0,
+            messages=messages,
         )
         raw = response.choices[0].message.content.strip()
         logger.debug("OpenRouter raw response: %s", raw)
@@ -69,28 +88,30 @@ async def parse_intent(text: str, current_time: Optional[str] = None) -> Optiona
         return None
 
 
-async def general_chat(text: str) -> str:
+async def general_chat(text: str, history: Optional[list] = None) -> str:
     """
     Conversational fallback for non-task messages.
-    Used when regex + intent parsing both fail to find a task action.
+    Includes conversation history so follow-ups like "5pm" are understood.
     """
+    _CHAT_SYSTEM = (
+        "You are a helpful AI assistant and personal task manager. "
+        "Answer questions naturally and concisely. "
+        "Remember prior messages in this conversation for context. "
+        "If the user wants to manage tasks, remind them: "
+        "'Add meeting at 3pm' or 'Show today's tasks'."
+    )
+
+    messages: list = [{"role": "system", "content": _CHAT_SYSTEM}]
+    if history:
+        messages.extend(history[-6:])   # last 6 messages for context
+    messages.append({"role": "user", "content": text})
+
     try:
         response = await _client.chat.completions.create(
             model=settings.OPENROUTER_MODEL,
             max_tokens=300,
             temperature=0.7,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a helpful AI assistant and personal task manager. "
-                        "Answer general questions naturally and concisely. "
-                        "If the user seems to want to manage tasks, remind them they can say things like "
-                        "'Add meeting at 3pm' or 'Show today's tasks'."
-                    ),
-                },
-                {"role": "user", "content": text},
-            ],
+            messages=messages,
         )
         return response.choices[0].message.content.strip()
     except Exception as exc:

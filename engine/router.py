@@ -19,7 +19,7 @@ from utils.regex_parser import ParseResult, parse
 logger = logging.getLogger(__name__)
 
 
-async def route(text: str) -> Optional[dict]:
+async def route(text: str, history: Optional[list] = None) -> Optional[dict]:
     """
     Returns a dict matching the intent schema, or None if unresolvable.
 
@@ -62,7 +62,7 @@ async def route(text: str) -> Optional[dict]:
     # ── 3. Claude fallback ────────────────────────────────────────────────
     logger.info("Escalating to Claude for: %s", normalised)
     now = datetime.now(timezone.utc).isoformat()
-    claude_result = await parse_intent(normalised, current_time=now)
+    claude_result = await parse_intent(normalised, current_time=now, history=history)
 
     if claude_result is None:
         logger.warning("Claude could not parse: %s", normalised)

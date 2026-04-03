@@ -1,6 +1,6 @@
 """
 Telegram message handlers.
-Handles: /start, /help, /summary, plain text, and voice messages.
+Handles: /start, /help, /summary, /clear, plain text, and voice messages.
 """
 import logging
 
@@ -14,6 +14,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
+from db.database import add_to_history, clear_history, get_history
 from engine.task_engine import handle_message
 from services.whisper_service import transcribe_voice
 
@@ -24,6 +25,7 @@ def setup_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("start", _start))
     app.add_handler(CommandHandler("help", _help))
     app.add_handler(CommandHandler("summary", _summary))
+    app.add_handler(CommandHandler("clear", _clear))
     app.add_handler(MessageHandler(filters.VOICE, _voice_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _text_handler))
 
@@ -37,6 +39,8 @@ async def _start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Try:\n"
         "• _Add a meeting tomorrow at 3pm_\n"
         "• _Show today's tasks_\n"
+        "• _When do I have to buy milk?_\n"
+        "• _What are my reminders for last 7 days?_\n"
         "• _Done with report_\n"
         "• Or send a voice note!\n\n"
         "Use /help for all commands.",
@@ -49,11 +53,13 @@ async def _help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "*Commands:*\n"
         "/start — Welcome message\n"
         "/help  — This message\n"
-        "/summary — Today's tasks\n\n"
+        "/summary — Today's tasks\n"
+        "/clear — Reset conversation memory\n\n"
         "*Natural language:*\n"
         "• Add [task] at [time]\n"
         "• Remind me to [task] tomorrow\n"
-        "• Show today's tasks\n"
+        "• Show today's tasks / last 15 days\n"
+        "• When do I have to buy milk?\n"
         "• Done with [task]\n"
         "• Delete [task]\n\n"
         "🎤 Voice messages also work!",
@@ -63,8 +69,18 @@ async def _help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def _summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = str(update.effective_user.id)
-    response = await handle_message("list today's tasks", user_id)
+    history = await get_history(user_id)
+    response = await handle_message("list today's tasks", user_id, history=history)
     await update.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
+
+
+async def _clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = str(update.effective_user.id)
+    await clear_history(user_id)
+    await update.message.reply_text(
+        "🧹 Conversation memory cleared! Starting fresh.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
 
 
 async def _text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -76,11 +92,18 @@ async def _text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     await update.message.chat.send_action("typing")
 
+    # Load conversation history for context
+    history = await get_history(user_id)
+
     try:
-        response = await handle_message(text, user_id)
+        response = await handle_message(text, user_id, history=history)
     except Exception as exc:
         logger.exception("Unhandled error in text_handler: %s", exc)
         response = "Something went wrong. Please try again."
+
+    # Save this turn to history
+    await add_to_history(user_id, "user", text)
+    await add_to_history(user_id, "assistant", response)
 
     await update.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
 
@@ -103,10 +126,17 @@ async def _voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f'🎤 _Heard: "{transcribed}"_', parse_mode=ParseMode.MARKDOWN
     )
 
+    # Load conversation history for context
+    history = await get_history(user_id)
+
     try:
-        response = await handle_message(transcribed, user_id)
+        response = await handle_message(transcribed, user_id, history=history)
     except Exception as exc:
         logger.exception("Unhandled error processing voice: %s", exc)
         response = "Something went wrong. Please try again."
+
+    # Save this turn to history
+    await add_to_history(user_id, "user", transcribed)
+    await add_to_history(user_id, "assistant", response)
 
     await update.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)

@@ -7,6 +7,7 @@ Key schema:
   behavior:{user_id}      → Redis list of JSON action logs
   reminder:{page_id}      → "1" (TTL 24h, dedup sent reminders)
   config:{key}            → string value (e.g. notion_database_id)
+  history:{user_id}       → Redis list of JSON {role, content} messages (TTL 2h)
 """
 import hashlib
 import json
@@ -86,6 +87,35 @@ async def is_reminder_sent(notion_page_id: str) -> bool:
 
 async def mark_reminder_sent(notion_page_id: str) -> None:
     await _redis.set(f"reminder:{notion_page_id}", "1", ex=REMINDER_TTL)
+
+
+# ---------------------------------------------------------------------------
+# Conversation history  (short-term memory per user)
+# ---------------------------------------------------------------------------
+MAX_HISTORY = 10          # max messages stored per user
+HISTORY_TTL  = 60 * 60 * 2   # 2 hours inactivity resets context
+
+
+async def add_to_history(user_id: str, role: str, content: str) -> None:
+    """Prepend a message to the user's history (newest first in Redis)."""
+    entry = json.dumps({"role": role, "content": content})
+    key = f"history:{user_id}"
+    await _redis.lpush(key, entry)
+    await _redis.ltrim(key, 0, MAX_HISTORY - 1)
+    await _redis.expire(key, HISTORY_TTL)
+
+
+async def get_history(user_id: str) -> list[dict]:
+    """Return conversation history in chronological order (oldest first)."""
+    entries = await _redis.lrange(f"history:{user_id}", 0, -1)
+    if not entries:
+        return []
+    return [json.loads(e) for e in reversed(entries)]
+
+
+async def clear_history(user_id: str) -> None:
+    """Wipe conversation history (e.g. on /clear command)."""
+    await _redis.delete(f"history:{user_id}")
 
 
 # ---------------------------------------------------------------------------
